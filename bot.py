@@ -14,8 +14,8 @@ from aiogram.utils.keyboard import ReplyKeyboardBuilder
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-# Точные рабочие данные вашего проекта
-TOKEN = "8947024615:AAHf9RX5nl70knZ3aKy_4WRuhn5f83vHkIs"
+# Точные данные авторизации вашего бота
+TOKEN = "8947024615:AAHf9RX5nl70knZ3aKy_4WRuhn5f83v4bIs"
 ADMIN_ID = 1924047464
 
 bot = Bot(token=TOKEN)
@@ -122,7 +122,6 @@ class ClientStates(StatesGroup):
 
 class AdminStates(StatesGroup):
     waiting_for_chat_id = State()
-    waiting_for_order_id = State()
 
 
 def get_client_main_kb():
@@ -151,6 +150,7 @@ def get_admin_kb():
     return builder.as_markup(resize_keyboard=True)
 
 
+# НОВОЕ: Генерация кнопок управления конкретным заказом
 def get_status_inline(order_id):
     builder = InlineKeyboardBuilder()
     builder.add(
@@ -160,10 +160,15 @@ def get_status_inline(order_id):
     )
     builder.add(
         types.InlineKeyboardButton(
-            text="✅ Готово", callback_data=f"st_done_{order_id}"
+            text="✅ Готово (Оповестить)", callback_data=f"st_done_{order_id}"
         )
     )
-    builder.adjust(2)
+    builder.add(
+        types.InlineKeyboardButton(
+            text="🗑️ Удалить заказ из списка", callback_data=f"st_del_{order_id}"
+        )
+    )
+    builder.adjust(2, 1)
     return builder.as_markup()
 
 
@@ -196,14 +201,12 @@ async def cmd_start(message: types.Message, state: FSMContext):
         )
 
 
-# ИСПРАВЛЕНО ТУТ: Прямая ссылка на ваш точный рабочий аккаунт поддержки
 @dp.message(F.text == "🆘 Помощь / Поддержка")
 async def client_support(message: types.Message):
     builder = InlineKeyboardBuilder()
     builder.add(
         types.InlineKeyboardButton(
-            text="💬 Написать продавцу", 
-            url="https://t.me/@Suvenir_Mentos"
+            text="💬 Написать продавцу", url="https://t.me"
         )
     )
     await message.answer(
@@ -254,6 +257,8 @@ async def client_handle_photo(message: types.Message, state: FSMContext):
     await state.update_data(photo_paths=paths)
     if len(paths) % 5 == 0 or len(paths) == 1:
         await message.answer(f"Принято фотографий: {len(paths)} шт.")
+
+
 @dp.message(ClientStates.sending_photos, F.text == "✅ Завершить и отправить")
 async def client_pre_validate_upload(message: types.Message, state: FSMContext):
     data = await state.get_data()
@@ -278,8 +283,6 @@ async def client_pre_validate_upload(message: types.Message, state: FSMContext):
         await message.answer(msg, reply_markup=get_confirm_upload_inline(), parse_mode="Markdown")
     else:
         await execute_final_upload(message, state)
-
-
 async def execute_final_upload(message: types.Message, state: FSMContext):
     data = await state.get_data()
     paths = data.get("photo_paths", [])
@@ -358,49 +361,77 @@ async def admin_all_orders(message: types.Message):
     await message.answer(text, parse_mode="Markdown")
 
 
+# НОВОЕ: Автоматический вывод всех заказов в виде кнопок! Вводить ничего не нужно
 @dp.message(F.text == "🔄 Изменить статус")
-async def admin_change_status_start(message: types.Message, state: FSMContext):
+async def admin_change_status_inline(message: types.Message):
     if message.from_user.id != ADMIN_ID: return
-    await state.set_state(AdminStates.waiting_for_order_id)
-    await message.answer("Введите номер заказа для смены статуса:")
-
-
-@dp.message(AdminStates.waiting_for_order_id)
-async def admin_change_status_get_id(message: types.Message, state: FSMContext):
-    if message.from_user.id != ADMIN_ID: return
-    order_id = message.text.strip()
     conn = sqlite3.connect("wb_shop.db")
     cursor = conn.cursor()
-    cursor.execute("SELECT order_number FROM orders WHERE order_number=?", (order_id,))
-    row = cursor.fetchone()
+    cursor.execute("SELECT order_number, status FROM orders")
+    rows = cursor.fetchall()
     conn.close()
-    if not row:
-        await message.answer("❌ Заказ не найден.")
-        await state.clear()
+
+    if not rows:
+        await message.answer("❌ Активных заказов для смены статуса нет.")
         return
-    await state.clear()
-    await message.answer(f"Выберите новый статус для №{order_id}:", reply_markup=get_status_inline(order_id))
+
+    builder = InlineKeyboardBuilder()
+    for r in rows:
+        icon = "⏳" if r[1] == "готовится" else "✅"
+        builder.add(types.InlineKeyboardButton(
+            text=f"{icon} №{r[0]}", callback_data=f"sel_ord_{r[0]}"
+        ))
+    builder.adjust(1)
+    await message.answer("Выберите заказ из списка ниже для управления:", reply_markup=builder.as_markup())
 
 
-# ИСПРАВЛЕНО ТУТ: Четкие индексы data[1] и data[2] теперь гарантируют смену статуса в базе на 100%!
+# Открытие меню управления выбранным заказом
+@dp.callback_query(F.data.startswith("sel_ord_"))
+async def admin_select_order_menu(callback: types.CallbackQuery):
+    order_id = callback.data.split("_")[2]
+    await callback.answer()
+    await callback.message.edit_text(
+        f"Управление заказом №`{order_id}`.\nВыберите нужное действие:",
+        reply_markup=get_status_inline(order_id), parse_mode="Markdown"
+    )
+
+
+# Обработка изменения статуса или УДАЛЕНИЯ заказа из списка
 @dp.callback_query(F.data.startswith("st_"))
 async def admin_confirm_status(callback: types.CallbackQuery):
     data = callback.data.split("_")
     action = data[1]
     order_id = data[2]
-    new_status = "готовится" if action == "prep" else "готово"
+
     conn = sqlite3.connect("wb_shop.db")
     cursor = conn.cursor()
+
+    if action == "del":
+        # Полное удаление выданного/готового заказа из списка
+        cursor.execute("DELETE FROM orders WHERE order_number=?", (order_id,))
+        conn.commit()
+        conn.close()
+        await callback.answer("Заказ успешно удален")
+        await callback.message.edit_text(f"🗑️ Заказ №`{order_id}` полностью удален из списка активных.", parse_mode="Markdown")
+        return
+
+    new_status = "готовится" if action == "prep" else "готово"
     cursor.execute("UPDATE orders SET status=? WHERE order_number=?", (new_status, order_id))
     cursor.execute("SELECT user_id FROM orders WHERE order_number=?", (order_id,))
     user_row = cursor.fetchone()
     conn.commit()
     conn.close()
-    await callback.answer(f"Статус изменен")
+
+    await callback.answer("Статус обновлен")
     await callback.message.edit_text(f"✅ Статус заказа №`{order_id}` изменен на *{new_status}*.", parse_mode="Markdown")
+
     if action == "done" and user_row and user_row[0]:
         try:
-            await bot.send_message(chat_id=int(user_row[0]), text=f"🎉 Ваш заказ №`{order_id}` готов к отправке!", parse_mode="Markdown")
+            await bot.send_message(
+                chat_id=int(user_row[0]), 
+                text=f"🎉 **Отличные новости!**\nВаш заказ фотографий №`{order_id}` полностью распечатан и готов к отправке!", 
+                parse_mode="Markdown"
+            )
         except Exception: pass
 
 
