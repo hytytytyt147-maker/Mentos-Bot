@@ -82,7 +82,7 @@ async def daily_clean_job():
 
 
 scheduler.add_job(daily_clean_job, "interval", hours=24)
-scheduler.start()
+# scheduler.start()
 class ClientStates(StatesGroup):
     waiting_for_wb_number = State()
     sending_photos = State()
