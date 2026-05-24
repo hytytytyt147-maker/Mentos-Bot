@@ -32,7 +32,7 @@ def init_db():
         "CREATE TABLE IF NOT EXISTS orders ("
         "order_number TEXT PRIMARY KEY, "
         "status TEXT DEFAULT 'готовится', "
-        "photo_count TEXT DEFAULT '0', " # Изменено на TEXT для ссылок
+        "photo_count TEXT DEFAULT '0', "
         "user_name TEXT, "
         "user_id INTEGER)"
     )
@@ -210,7 +210,7 @@ async def client_support(message: types.Message):
     await message.answer(
         "🆘 **Поддержка клиентов**\n\n"
         "Отправьте номер вашего заказа WB, а затем загрузите фото "
-        "или просто пришлите ссылку на Яндекс/Google Диск.",
+        "или просто пришлите ЛЮБУЮ ссылку на файлы/архив.",
         reply_markup=builder.as_markup(),
         parse_mode="Markdown",
     )
@@ -239,7 +239,7 @@ async def client_get_number(message: types.Message, state: FSMContext):
     await message.answer(
         f"Заказ №{num} привязан!\n\n"
         "Шаг 2: Начните отправлять фотографии "
-        "ИЛИ просто пришлите ссылку на Яндекс/Google Диск в ответном сообщении.",
+        "ИЛИ просто пришлите интернет-ссылку на файлы/облако.",
         reply_markup=get_client_upload_kb(),
     )
 
@@ -258,27 +258,27 @@ async def client_handle_photo(message: types.Message, state: FSMContext):
         await message.answer(f"Принято фотографий: {len(paths)} шт.")
 
 
-# НОВОЕ: Перехват Ссылок на Облако (Яндекс, Гугл, Майл)
-@dp.message(ClientStates.sending_photos, F.text.contains("http"))
-async def client_handle_cloud_link(message: types.Message, state: FSMContext):
+# ИСПРАВЛЕНО ТУТ: Ловим абсолютно любые ссылки (на любые облака, гитхабы, сайты)
+@dp.message(ClientStates.sending_photos, F.text.startswith("http"))
+async def client_handle_any_link(message: types.Message, state: FSMContext):
     data = await state.get_data()
     num = data.get("wb_num")
     link = message.text.strip()
     user_info = f"{message.from_user.full_name} (@{message.from_user.username})"
     now_str = datetime.now().strftime("%d.%m.%Y %H:%M")
 
-    # Сохраняем ссылку в базу вместо количества фото
+    # Сохраняем в БД текстовую пометку
     conn = sqlite3.connect("wb_shop.db")
     cursor = conn.cursor()
-    cursor.execute("INSERT OR REPLACE INTO orders VALUES (?, 'готовится', 'Ссылка на диск', ?, ?)", (num, user_info, message.from_user.id))
+    cursor.execute("INSERT OR REPLACE INTO orders VALUES (?, 'готовится', 'По ссылке', ?, ?)", (num, user_info, message.from_user.id))
     conn.commit()
     conn.close()
 
-    # Карточка заказа для вас в целевой чат
+    # Сразу шлем админу карточку с кликабельной ссылкой
     report_text = (
         f"📥 **НОВЫЙ ЗАКАЗ ПО ССЫЛКЕ!**\n\n"
         f"📦 **WB:** `{num}`\n"
-        f"🌐 **Ссылка на диск:** {link}\n"
+        f"🌐 **Ссылка:** {link}\n"
         f"📅 **Дата:** {now_str}\n"
         f"👤 **Кто:** {user_info}\n"
     )
@@ -290,13 +290,13 @@ async def client_handle_cloud_link(message: types.Message, state: FSMContext):
         await bot.send_message(chat_id=ADMIN_ID, text=f"Ошибка отправки: {e}")
 
     await state.clear()
-    await message.answer("🎉 Ваша ссылка успешно отправлена продавцу! Мы известим вас о готовности заказа.", reply_markup=get_client_main_kb())
+    await message.answer("🎉 Ваша ссылка успешно принята! Мы известим вас о готовности заказа.", reply_markup=get_client_main_kb())
 @dp.message(ClientStates.sending_photos, F.text == "✅ Завершить и отправить")
 async def client_pre_validate_upload(message: types.Message, state: FSMContext):
     data = await state.get_data()
     paths = data.get("photo_paths", [])
     if not paths:
-        await message.answer("Вы не отправили ни одной фотографии!")
+        await message.answer("Вы не отправили ни одной фотографии! Если вы хотите отправить ссылку, просто вставьте её в чат.")
         return
     count = len(paths)
     target_tariff = 25
@@ -391,7 +391,7 @@ async def admin_all_orders(message: types.Message):
         return
     text = "📋 **Текущие заказы:**\n\n"
     for r in rows:
-        text += f"📦 №`{r}` | Статус: *{r}* | Тип/Кол-во: {r}\n"
+        text += f"📦 №`{r}` | Статус: *{r}* | Информация: {r}\n"
     await message.answer(text, parse_mode="Markdown")
 
 
@@ -479,7 +479,7 @@ async def client_check_any_order(message: types.Message):
     row = cursor.fetchone()
     conn.close()
     if row:
-        await message.answer(f"📦 **Статус №{text}:**\n\nСостояние: *{row}*\nТип/Кол-во: {row}", parse_mode="Markdown")
+        await message.answer(f"📦 **Статус №{text}:**\n\nСостояние: *{row}*\nИнформация: {row}", parse_mode="Markdown")
     else:
         await message.answer("❌ Заказ пока не найден.")
 
