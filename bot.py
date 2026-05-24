@@ -11,14 +11,13 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.utils.keyboard import ReplyKeyboardBuilder
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-# Токен и ваш ID (как владельца магазина)
+# Вставляем ваш точный рабочий токен
 TOKEN = "8947024615:AAHf9RX5nl70knZ3aKy_4WRuhn5f83vHkIs"
 ADMIN_ID = 1924047464
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
-# Создаем папки для временного хранения фото перед архивацией
 if not os.path.exists("temp_photos"):
     os.makedirs("temp_photos")
 
@@ -26,7 +25,6 @@ if not os.path.exists("temp_photos"):
 def init_db():
     conn = sqlite3.connect("wb_shop.db")
     cursor = conn.cursor()
-    # Таблица заказов
     cursor.execute(
         "CREATE TABLE IF NOT EXISTS orders ("
         "order_number TEXT PRIMARY KEY, "
@@ -35,7 +33,6 @@ def init_db():
         "user_name TEXT, "
         "user_id INTEGER)"
     )
-    # Таблица настроек для админа
     cursor.execute(
         "CREATE TABLE IF NOT EXISTS settings ("
         "key TEXT PRIMARY KEY, value TEXT)"
@@ -60,7 +57,7 @@ def get_target_chat():
     )
     row = cursor.fetchone()
     conn.close()
-    return int(row) if row else ADMIN_ID
+    return int(row[0]) if row else ADMIN_ID
 
 
 def update_target_chat(new_id):
@@ -142,6 +139,8 @@ async def cmd_start(message: types.Message, state: FSMContext):
             "Здесь вы можете передать ваши фото по заказу WB.",
             reply_markup=get_client_main_kb(),
         )
+
+
 @dp.message(F.text == "📥 Отправить фотографии")
 async def client_start_upload(
     message: types.Message, state: FSMContext
@@ -157,6 +156,14 @@ async def client_start_upload(
 async def client_get_number(
     message: types.Message, state: FSMContext
 ):
+    # Исправлено: жесткая защита от не-текстовых сообщений (фотографий)
+    if not message.text:
+        await message.answer(
+            "⚠️ Ошибка! Пожалуйста, отправьте номер заказа "
+            "обычным текстом (только цифры):"
+        )
+        return
+
     num = message.text.strip()
     if not num.isdigit() or len(num) < 4:
         await message.answer("Неверный номер заказа. Введите только цифры:")
@@ -167,12 +174,9 @@ async def client_get_number(
     await message.answer(
         f"Заказ №{num} успешно привязан!\n\n"
         "Шаг 2: Начните отправлять мне фотографии.\n"
-        "Вы можете отправлять их по одной или пачкой.\n"
         "Когда отправите ВСЕ фотографии, нажмите кнопку ниже:",
         reply_markup=get_client_upload_kb(),
     )
-
-
 @dp.message(ClientStates.sending_photos, F.photo)
 async def client_handle_photo(
     message: types.Message, state: FSMContext
@@ -180,7 +184,6 @@ async def client_handle_photo(
     data = await state.get_data()
     paths = data.get("photo_paths", [])
 
-    # Скачиваем фото на сервер во временную папку
     photo_id = message.photo[-1].file_id
     file_info = await bot.get_file(photo_id)
 
@@ -190,7 +193,6 @@ async def client_handle_photo(
     paths.append(local_path)
     await state.update_data(photo_paths=paths)
 
-    # Не спамим сообщениями на каждую фотку, просто информируем
     if len(paths) % 5 == 0 or len(paths) == 1:
         await message.answer(f"Принято фотографий: {len(paths)} шт.")
 
@@ -213,7 +215,6 @@ async def client_finish_upload(
         "⏳ Создаю архив и отправляю владельцу магазина... Подождите."
     )
 
-    # АВТОМАТИЧЕСКАЯ АРХИВАЦИЯ В ZIP
     zip_name = f"Order_{num}.zip"
     with zipfile.ZipFile(
         zip_name, "w", zipfile.ZIP_DEFLATED
@@ -221,11 +222,11 @@ async def client_finish_upload(
         for p in paths:
             if os.path.exists(p):
                 zipf.write(p, os.path.basename(p))
-                os.remove(p)  # Сразу удаляем одиночный файл, очищая сервер
+                os.remove(p)
 
-    # Сохраняем информацию о заказе в Базу Данных
     user_info = (
-        f"{message.from_user.full_name} (@{message.from_user.username})"
+        f"{message.from_user.full_name} "
+        f"(@{message.from_user.username})"
     )
     conn = sqlite3.connect("wb_shop.db")
     cursor = conn.cursor()
@@ -238,7 +239,6 @@ async def client_finish_upload(
     conn.commit()
     conn.close()
 
-    # Формируем красивый отчет для вас (Админа)
     now_str = datetime.now().strftime("%d.%m.%Y %H:%M")
     report_text = (
         f"📥 **НОВЫЙ ЗАКАЗ НА ПЕЧАТЬ ФОТО!**\n\n"
@@ -248,10 +248,10 @@ async def client_finish_upload(
         f"👤 **Кто заказал:** {user_info}\n"
     )
 
-    # Отправляем ZIP-архив админу в целевой чат
     target = get_target_chat()
     try:
         input_file = types.FSInputFile(zip_name)
+        # Исправлено: добавлен обязательный аргумент text / caption
         await bot.send_document(
             chat_id=target, document=input_file, caption=report_text
         )
@@ -260,7 +260,6 @@ async def client_finish_upload(
             chat_id=ADMIN_ID, text=f"Ошибка отправки архива: {e}"
         )
 
-    # Удаляем сам архив с сервера, так как он уже улетел в Telegram
     if os.path.exists(zip_name):
         os.remove(zip_name)
 
@@ -281,9 +280,11 @@ async def client_cancel(message: types.Message, state: FSMContext):
             os.remove(p)
     await state.clear()
     await message.answer(
-        "Загрузка отменена. Все временные файлы стерты.",
+        "Загрузка отменена. Все файлы стерты.",
         reply_markup=get_client_main_kb(),
     )
+
+
 @dp.message(F.text == "📦 Проверить мой заказ")
 async def client_check_order_start(message: types.Message):
     await message.answer("Введите номер вашего заказа WB для проверки:")
@@ -308,8 +309,8 @@ async def admin_all_orders(message: types.Message):
     text = "📋 **Текущие заказы на печать:**\n\n"
     for r in rows:
         text += (
-            f"📦 №`{r}` | Статус: *{r}* | "
-            f"Фото: {r} шт.\n"
+            f"📦 №`{r[0]}` | Статус: *{r[1]}* | "
+            f"Фото: {r[2]} шт.\n"
         )
     await message.answer(text, parse_mode="Markdown")
 
@@ -355,8 +356,8 @@ async def admin_change_status_get_id(
 @dp.callback_query(F.data.startswith("st_"))
 async def admin_confirm_status(callback: types.CallbackQuery):
     data = callback.data.split("_")
-    action = data
-    order_id = data
+    action = data[1]
+    order_id = data[2]
 
     new_status = "готовится" if action == "prep" else "готово"
 
@@ -378,13 +379,12 @@ async def admin_confirm_status(callback: types.CallbackQuery):
         parse_mode="Markdown",
     )
 
-    # Если статус "Готово" — автоматически пишем клиенту в ЛС!
-    if action == "done" and user_row and user_row:
+    if action == "done" and user_row and user_row[0]:
         try:
             await bot.send_message(
-                chat_id=int(user_row),
+                chat_id=int(user_row[0]),
                 text=f"🎉 **Отличные новости!**\n"
-                f"Ваш заказ фотографий №`{order_id}` полностью распечатан "
+                f"Ваш заказ фотографий №`{order_id}` распечатан "
                 f"и готов к отправке через Wildberries!",
                 parse_mode="Markdown",
             )
@@ -398,8 +398,8 @@ async def admin_cfg_chat(message: types.Message, state: FSMContext):
         return
     await state.set_state(AdminStates.waiting_for_chat_id)
     await message.answer(
-        "Введите Telegram ID чата/группы, куда бот будет присылать ZIP-архивы.\n"
-        f"Текущий ID чата: `{get_target_chat()}`"
+        "Введите ID чата для отправки ZIP-архивов.\n"
+        f"Текущий ID: `{get_target_chat()}`"
     )
 
 
@@ -411,10 +411,10 @@ async def admin_save_chat(message: types.Message, state: FSMContext):
     try:
         update_target_chat(int(new_id))
         await message.answer(
-            f"✅ Чат для архивов успешно изменен на `{new_id}`!"
+            f"✅ Чат для архивов изменен на `{new_id}`!"
         )
     except Exception:
-        await message.answer("Ошибка. Введите корректный числовой ID чата.")
+        await message.answer("Ошибка. Введите корректный числовой ID.")
     await state.clear()
 
 
@@ -436,8 +436,8 @@ async def client_check_any_order(message: types.Message):
     if row:
         await message.answer(
             f"📦 **Статус заказа №{text}:**\n\n"
-            f"Состояние: *{row}*\n"
-            f"Всего фотографий: {row} шт.",
+            f"Состояние: *{row[0]}*\n"
+            f"Всего фотографий: {row[1]} шт.",
             parse_mode="Markdown",
         )
     else:
