@@ -1,186 +1,461 @@
-import asyncio
-import os
-import shutil
-import zipfile
-from aiogram import Bot, Dispatcher, F, types
+import io
+import time
+import sqlite3
+from aiogram import Bot, Dispatcher, F, types, BaseMiddleware
 from aiogram.filters import CommandStart
-from aiogram.client.session.aiohttp import AiohttpSession
-from aiogram.utils.keyboard import ReplyKeyboardBuilder
 from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import StatesGroup, State
-import barcode
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.utils.keyboard import ReplyKeyboardBuilder
+from aiogram.utils.keyboard import InlineKeyboardBuilder
+from barcode import generate
 from barcode.writer import ImageWriter
 
-TOKEN = "8947024615:AAHf9RX5nl70knZ3aKy_4WRuhn5f83vHkIs"
-PROXY_URL = "http://127.0.0.1:10809"
-ADMIN_ID = 1924047464  
+TOKEN = "6847024615:AAHF9RX5n17QknZx3ky_4kRuHn5f83v4bIs"
+ADMIN_ID = 1924047464
 
-session = AiohttpSession(proxy=PROXY_URL)
-bot = Bot(token=TOKEN, session=session)
+bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
-# Состояния бота для контроля шагов пользователя
-class OrderStates(StatesGroup):
-    waiting_for_order_number = State()  # Ожидание ввода номера заказа
-    uploading_photos = State()          # Ожидание загрузки фотографий
+# ==========================================
+# 1. БАЗА ДАННЫХ (SQLite)
+# ==========================================
+def init_db():
+    conn = sqlite3.connect("bot_database.db")
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS orders (
+            order_number TEXT PRIMARY KEY,
+            status TEXT DEFAULT 'готовится',
+            photo_count INTEGER DEFAULT 0,
+            user_id INTEGER
+        )
+    ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        )
+    ''')
+    cursor.execute(
+        "INSERT OR IGNORE INTO settings (key, value) "
+        "VALUES ('archive_chat_id', ?)", 
+        (str(ADMIN_ID),)
+    )
+    conn.commit()
+    conn.close()
 
-# Клавиатура до ввода заказа
-def get_start_keyboard():
+init_db()
+
+def get_setting(key):
+    conn = sqlite3.connect("bot_database.db")
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT value FROM settings WHERE key = ?", 
+        (key,)
+    )
+    row = cursor.fetchone()
+    conn.close()
+    return row[0] if row else str(ADMIN_ID)
+
+def update_setting(key, value):
+    conn = sqlite3.connect("bot_database.db")
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT OR REPLACE INTO settings (key, value) "
+        "VALUES (?, ?)", 
+        (key, value)
+    )
+    conn.commit()
+    conn.close()
+
+# ==========================================
+# 2. ЗАЩИТА ОТ СПАМА (Middleware)
+# ==========================================
+class AntiSpamMiddleware(BaseMiddleware):
+    def __init__(self, limit: int = 2):
+        self.limit = limit
+        self.storage = {}
+        super().__init__()
+
+    async def __call__(self, handler, event: types.Message, data: dict):
+        if not event.from_user:
+            return await handler(event, data)
+        
+        user_id = event.from_user.id
+        now = time.time()
+        
+        if user_id in self.storage:
+            last_time = self.storage[user_id]
+            if now - last_time < self.limit:
+                if user_id != ADMIN_ID:
+                    return await event.answer(
+                        "⚠️ Пожалуйста, не спамьте!"
+                    )
+                return
+        
+        self.storage[user_id] = now
+        return await handler(event, data)
+
+dp.message.middleware(AntiSpamMiddleware(limit=1))
+
+# ==========================================
+# 3. СОСТОЯНИЯ И КЛАВИАТУРЫ
+# ==========================================
+class OrderStates(StatesGroup):
+    waiting_for_order_number = State()
+    uploading_photos = State()
+
+class AdminStates(StatesGroup):
+    waiting_for_archive_chat = State()
+    waiting_for_status_order = State()
+
+def get_admin_main_keyboard():
     builder = ReplyKeyboardBuilder()
-    builder.add(types.KeyboardButton(text="📥 Начать загрузку"))
+    builder.add(types.KeyboardButton(text="⚡ Начать сборку"))
+    builder.add(types.KeyboardButton(text="📋 Все заказы"))
+    builder.add(types.KeyboardButton(text="⚙️ Admin Панель"))
+    builder.adjust(1, 2)
     return builder.as_markup(resize_keyboard=True)
 
-# Клавиатура во время загрузки фото
-def get_upload_keyboard():
-    builder = ReplyKeyboardBuilder()
-    builder.add(types.KeyboardButton(text="✅ Подтвердить отправку"))
-    builder.add(types.KeyboardButton(text="❌ Отменить заказ"))
-    builder.adjust(1, 1)
-    return builder.as_markup(resize_keyboard=True, input_field_placeholder="Загрузите фото...")
+def get_admin_panel_inline():
+    builder = InlineKeyboardBuilder()
+    builder.add(types.InlineKeyboardButton(
+        text="📁 Изменить чат архивов", 
+        callback_data="admin_change_chat"
+    ))
+    builder.add(types.InlineKeyboardButton(
+        text="🔄 Изменить статус заказа", 
+        callback_data="admin_change_status"
+    ))
+    builder.add(types.InlineKeyboardButton(
+        text="🗑️ Очистить базу заказов", 
+        callback_data="admin_clear_orders"
+    ))
+    builder.adjust(1)
+    return builder.as_markup()
 
+def get_assembly_keyboard():
+    builder = ReplyKeyboardBuilder()
+    builder.add(types.KeyboardButton(text="Подтвердить отправку"))
+    builder.add(types.KeyboardButton(text="Отменить заказ"))
+    builder.adjust(1, 1)
+    return builder.as_markup(
+        resize_keyboard=True, 
+        input_field_placeholder="Загрузите фото..."
+    )
+
+# ==========================================
+# 4. ХЕНДЛЕРЫ: СТАРТ И ОБЫЧНЫЕ ПОЛЬЗОВАТЕЛИ
+# ==========================================
 @dp.message(CommandStart())
 async def cmd_start(message: types.Message, state: FSMContext):
     await state.clear()
-    await message.answer(
-        f"Приветствую, {message.from_user.first_name}!\n\n"
-        "Это тестовая система приема фотографий для заказов Wildberries.\n"
-        "Нажмите кнопку ниже, чтобы привязать ваш заказ.",
-        reply_markup=get_start_keyboard()
-    )
-
-@dp.message(F.text == "📥 Начать загрузку")
-async def start_order_process(message: types.Message, state: FSMContext):
-    await state.set_state(OrderStates.waiting_for_order_number)
-    await message.answer(
-        "Пожалуйста, введите **номер вашего заказа** Wildberries.\n"
-        "(Для теста введите любое число, например: 1234567890)",
-        reply_markup=types.ReplyKeyboardRemove() # Убираем кнопку, чтобы человек мог писать текст
-    )
-
-# Ловим номер заказа
-@dp.message(OrderStates.waiting_for_order_number)
-async def process_order_number(message: types.Message, state: FSMContext):
-    order_number = message.text.strip()
     
-    # Тестовая проверка: номер должен состоять только из цифр
-    if not order_number.isdigit():
-        await message.answer("⚠️ Неверный формат. Номер заказа должен состоять только из цифр. Попробуйте еще раз:")
+    if message.from_user.id == ADMIN_ID:
+        await message.answer(
+            f"Привет, Администратор {message.from_user.first_name}!\n"
+            "Вы вошли в систему инвентаризации WB.",
+            reply_markup=get_admin_main_keyboard()
+        )
+    else:
+        await message.answer(
+            f"Привет, {message.from_user.first_name}!\n"
+            "Система отслеживания готовности заказов.",
+            reply_markup=types.ReplyKeyboardRemove()
+        )
+
+@dp.message(F.text == "📋 Все заказы")
+async def show_all_orders_text(message: types.Message):
+    if message.from_user.id != ADMIN_ID: return
+    
+    conn = sqlite3.connect("bot_database.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT order_number, status, photo_count FROM orders")
+    rows = cursor.fetchall()
+    conn.close()
+    
+    if not rows:
+        await message.answer("📭 Список заказов пуст.")
         return
-
-    # Сохраняем номер заказа в память бота
-    await state.update_data(order_number=order_number)
-    await state.set_state(OrderStates.uploading_photos)
+        
+    report = "📊 **Список текущих заказов:**\n\n"
+    for row in rows:
+        report += (
+            f"📦 Заказ №`{row[0]}` | "
+            f"Статус: *{row[1]}* | "
+            f"Фото: {row[2]} шт.\n"
+        )
     
+    await message.answer(report, parse_mode="Markdown")
+
+@dp.message(F.text == "⚙️ Admin Панель")
+async def open_admin_panel(message: types.Message):
+    if message.from_user.id != ADMIN_ID: return
+    current_chat = get_setting("archive_chat_id")
     await message.answer(
-        f"✅ Заказ №`{order_number}` успешно авторизован!\n\n"
-        "Теперь вы можете отправить фотографии (альбомом, поодиночке или файлами).\n"
-        "Как закончите — обязательно нажмите кнопку **«✅ Подтвердить отправку»**.",
-        reply_markup=get_upload_keyboard(),
+        f"⚙️ **Панель настроек**\n\n"
+        f"ID отправки архивов: `{current_chat}`",
+        reply_markup=get_admin_panel_inline(),
         parse_mode="Markdown"
     )
 
-# Сброс и отмена
-@dp.message(OrderStates.uploading_photos, F.text == "❌ Отменить заказ")
-async def cancel_order(message: types.Message, state: FSMContext):
-    user_id = message.from_user.id
-    user_dir = f"downloads/{user_id}"
-    if os.path.exists(user_dir):
-        shutil.rmtree(user_dir)
-    await state.clear()
-    await message.answer("❌ Загрузка отменена. Данные стерты.", reply_markup=get_start_keyboard())
+# ==========================================
+# 5. ЛОГИКА НАСТРОЕК (CALLBACKS)
+# ==========================================
+@dp.callback_query(F.data == "admin_change_chat")
+async def admin_change_chat_step1(
+    callback: types.CallbackQuery, state: FSMContext
+):
+    await callback.answer()
+    await state.set_state(AdminStates.waiting_for_archive_chat)
+    await callback.message.answer("Введите новый Telegram ID чата:")
 
-# Кнопка завершения
-@dp.message(OrderStates.uploading_photos, F.text == "✅ Подтвердить отправку")
-async def cmd_confirm_send(message: types.Message, state: FSMContext):
-    user_id = message.from_user.id
-    username = message.from_user.username or "id_user"
+@dp.message(AdminStates.waiting_for_archive_chat)
+async def admin_change_chat_step2(message: types.Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID: return
+    new_chat = message.text.strip()
+    update_setting("archive_chat_id", new_chat)
+    await state.clear()
+    await message.answer(
+        f"✅ Чат изменен на: `{new_chat}`", 
+        parse_mode="Markdown", 
+        reply_markup=get_admin_main_keyboard()
+    )
+
+@dp.callback_query(F.data == "admin_clear_orders")
+async def admin_clear_orders(callback: types.CallbackQuery):
+    conn = sqlite3.connect("bot_database.db")
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM orders")
+    conn.commit()
+    conn.close()
+    await callback.answer("🗑️ Все заказы удалены", show_alert=True)
+
+@dp.callback_query(F.data == "admin_change_status")
+async def admin_status_step1(
+    callback: types.CallbackQuery, state: FSMContext
+):
+    await callback.answer()
+    await state.set_state(AdminStates.waiting_for_status_order)
+    await callback.message.answer("Введите номер изменяемого заказа:")
+
+@dp.message(AdminStates.waiting_for_status_order)
+async def admin_status_step2(message: types.Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID: return
+    order_id = message.text.strip()
     
-    # Извлекаем сохраненный номер заказа из памяти
-    user_data = await state.get_data()
-    order_number = user_data.get("order_number", "unknown")
+    conn = sqlite3.connect("bot_database.db")
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT order_number FROM orders WHERE order_number = ?", 
+        (order_id,)
+    )
+    if not cursor.fetchone():
+        await message.answer("❌ Заказ с таким номером не найден.")
+        conn.close()
+        await state.clear()
+        return
+    conn.close()
     
-    user_dir = f"downloads/{user_id}"
-    # Теперь архив называется именем заказа!
-    zip_path = f"downloads/заказ_{order_number}.zip"
+    builder = InlineKeyboardBuilder()
+    builder.add(types.InlineKeyboardButton(
+        text="⏳ Готовится", 
+        callback_data=f"set_stat_prep_{order_id}"
+    ))
+    builder.add(types.InlineKeyboardButton(
+        text="✅ Готово", 
+        callback_data=f"set_stat_done_{order_id}"
+    ))
+    builder.adjust(2)
     
-    if not os.path.exists(user_dir) or not os.listdir(user_dir):
-        await message.answer("⚠️ Вы еще не загрузили ни одного фото. Отправьте изображения в чат.")
+    await state.clear()
+    await message.answer(
+        f"Выберите статус для №{order_id}:", 
+        reply_markup=builder.as_markup()
+    )
+
+@dp.callback_query(F.data.startswith("set_stat_"))
+async def admin_status_confirm(callback: types.CallbackQuery):
+    data = callback.data.split("_")
+    status_type = data[2]
+    order_id = data[3]
+    
+    new_status = "готовится" if status_type == "prep" else "готово"
+    
+    conn = sqlite3.connect("bot_database.db")
+    cursor = conn.cursor()
+    cursor.execute(
+        "UPDATE orders SET status = ? WHERE order_number = ?", 
+        (new_status, order_id)
+    )
+    conn.commit()
+    conn.close()
+    
+    await callback.answer(f"Статус изменен на '{new_status}'")
+    await callback.message.edit_text(
+        f"✅ Статус заказа №`{order_id}` изменен на *{new_status}*.", 
+        parse_mode="Markdown"
+    )
+
+# ==========================================
+# 6. СБОРКА И ПРОВЕРКА ВВОДА НОМЕРА
+# ==========================================
+@dp.message(F.text == "⚡ Начать сборку")
+async def start_assembly(message: types.Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID: return
+    await state.set_state(OrderStates.waiting_for_order_number)
+    await message.answer(
+        "Шаг 1: Введите или отсканируйте номер заказа:", 
+        reply_markup=types.ReplyKeyboardRemove()
+@dp.message(OrderStates.waiting_for_order_number)
+async def process_order_number(message: types.Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID: 
         return
 
-    processing_msg = await message.answer("⏳ Формируем архив и генерируем стикер штрих-кода...")
-
-    try:
-        # ГЕНЕРАЦИЯ ШТРИХ-КОДА ПО НОМЕРУ ЗАКАЗА
-        # Используем популярный стандарт Code128 (подходит для большинства сканеров и WB)
-        # ГЕНЕРАЦИЯ ШТРИХ-КОДА ПО НОМЕРУ ЗАКАЗА
-        code_class = barcode.get_barcode_class('code128')
-        generated_code = code_class(order_number, writer=ImageWriter())
-
-        barcode_img_path = f"{user_dir}/штрихкод_{order_number}"
-        # Библиотека сама допишет .png в конец, файл сохранится прямо в папку с фото клиента
-        generated_code.save(barcode_img_path)
-
-        # Создаем ZIP-архив (куда попадут все фото + сгенерированный штрих-код)
-        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
-            for root, dirs, files in os.walk(user_dir):
-                for file in files:
-                    zipf.write(os.path.join(root, file), file)
-
-        # Отправляем готовый брендированный архив админу
-        document = types.FSInputFile(zip_path)
-        await bot.send_document(
-            chat_id=ADMIN_ID, 
-            document=document, 
-            caption=f"📦 **ПОСТУПИЛ НОВЫЙ ЗАКАЗ WB**\n\n🔢 Номер заказа: `{order_number}`\n👤 Клиент: @{username}\n🆔 Telegram ID: {user_id}",
-            parse_mode="Markdown"
+    # Защита от пустого сообщения
+    if not message.text:
+        await message.answer(
+            "⚠️ Вы прислали пустую строку или не текст.\n"
+            "Пожалуйста, введите корректный номер заказа:"
         )
-        await processing_msg.delete()
-        await message.answer("🎉 Все ваши фотографии успешно упакованы и отправлены в производственный цех!", reply_markup=get_start_keyboard())
-        await state.clear() # Полностью очищаем состояние пользователя для нового заказа
-        
-    except Exception as e:
-        await processing_msg.delete()
-        await message.answer(f"⚠️ Ошибка на сервере сборки: {e}. Попробуйте нажать кнопку еще раз.")
+        return
 
-    # Чистим временные файлы
-    if os.path.exists(user_dir):
-        shutil.rmtree(user_dir)
-    if os.path.exists(zip_path):
-        os.remove(zip_path)
+    order_number = message.text.strip()
 
-# Сохранение фото (срабатывает только внутри активного процесса заказа)
-@dp.message(OrderStates.uploading_photos, F.photo)
-async def handle_photo(message: types.Message):
-    user_id = message.from_user.id
-    user_dir = f"downloads/{user_id}"
-    os.makedirs(user_dir, exist_ok=True)
-    
-    for index, photo_size in enumerate(message.photo):
-        file_id = photo_size.file_id
-        file_name = f"msg_{message.message_id}_size_{index}.jpg"
-        file = await bot.get_file(file_id)
-        await bot.download_file(file.file_path, f"{user_dir}/{file_name}")
+    # Проверка: только цифры
+    if not order_number.isdigit():
+        await message.answer(
+            "❌ Ошибка! Номер заказа должен состоять ТОЛЬКО из цифр.\n"
+            "Вы ввели буквы или спецсимволы. Попробуйте ещё раз:"
+        )
+        return
 
-# Сохранение файлов (фото без сжатия)
-@dp.message(OrderStates.uploading_photos, F.document)
-async def handle_document(message: types.Message):
-    if message.document.mime_type and message.document.mime_type.startswith("image/"):
-        user_id = message.from_user.id
-        user_dir = f"downloads/{user_id}"
-        os.makedirs(user_dir, exist_ok=True)
-        
-        file_id = message.document.file_id
-        file_name = message.document.file_name or f"file_{message.message_id}.jpg"
-        file = await bot.get_file(file_id)
-        await bot.download_file(file.file_path, f"{user_dir}/{file_name}")
+    # Проверка длины сборочного задания WB (от 5 до 25 цифр)
+    if len(order_number) < 5 or len(order_number) > 25:
+        await message.answer(
+            "⚠️ Неверный формат! Номер слишком короткий или длинный.\n"
+            "Перепроверьте номер и введите его заново:"
+        )
+        return
 
-async def main():
-    os.makedirs("downloads", exist_ok=True)
     try:
-        await bot.delete_webhook(drop_pending_updates=True)
+        fp = io.BytesIO()
+        generate(
+            'code128', 
+            order_number, 
+            writer=ImageWriter(), 
+            output=fp, 
+            text=order_number
+        )
+        fp.seek(0)
+        photo = types.BufferedInputFile(
+            fp.read(), 
+            filename="barcode.png"
+        )
+        await message.answer_photo(
+            photo=photo, 
+            caption=f"Штрихкод для заказа №{order_number}."
+        )
+    except Exception as e:
+        await message.answer(f"Ошибка штрихкода: {e}")
+
+    conn = sqlite3.connect("bot_database.db")
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT OR REPLACE INTO orders "
+        "(order_number, status, photo_count, user_id) "
+        "VALUES (?, 'готовится', 0, ?)", 
+        (order_number, message.from_user.id)
+    )
+    conn.commit()
+    conn.close()
+
+    await state.update_data(order_number=order_number, photos=[])
+    await state.set_state(OrderStates.uploading_photos)
+    await message.answer(
+        f"Заказ №{order_number} открыт. Отправляйте фото товара.\n"
+        "По окончании нажмите «Подтвердить отправку».", 
+        reply_markup=get_assembly_keyboard()
+    )
+
+
+@dp.message(OrderStates.uploading_photos, F.photo)
+async def handle_photo(message: types.Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID: 
+        return
+
+    user_data = await state.get_data()
+    photos_list = user_data.get("photos", [])
+    photos_list.append(message.photo[-1].file_id)
+    await state.update_data(photos=photos_list)
+
+    order_number = user_data.get("order_number")
+    conn = sqlite3.connect("bot_database.db")
+    cursor = conn.cursor()
+    cursor.execute(
+        "UPDATE orders SET photo_count = ? WHERE order_number = ?", 
+        (len(photos_list), order_number)
+    )
+    conn.commit()
+    conn.close()
+
+    await message.answer(f"Фото добавлено (всего: {len(photos_list)})")
+
+
+@dp.message(OrderStates.uploading_photos, F.text == "Подтвердить отправку")
+async def confirm_assembly(message: types.Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID: 
+        return
+
+    user_data = await state.get_data()
+    order_number = user_data.get("order_number")
+    photos_list = user_data.get("photos", [])
+
+    if not photos_list:
+        await message.answer("Загрузите хотя бы одно фото товара.")
+        return
+
+    archive_target = get_setting("archive_chat_id")
+
+    try:
+        await bot.send_message(
+            chat_id=archive_target, 
+            text=f"📦 Архив заказа №{order_number}. Фото: {len(photos_list)}"
+        )
     except Exception:
         pass
-    await dp.start_polling(bot)
+
+    await message.answer(
+        f"✅ Сборка заказа №{order_number} завершена!", 
+        reply_markup=get_admin_main_keyboard()
+    )
+    await state.clear()
+
+
+@dp.message(OrderStates.uploading_photos, F.text == "Отменить заказ")
+async def cancel_assembly(message: types.Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID: 
+        return
+
+    user_data = await state.get_data()
+    order_number = user_data.get("order_number")
+
+    conn = sqlite3.connect("bot_database.db")
+    cursor = conn.cursor()
+    cursor.execute(
+        "DELETE FROM orders WHERE order_number = ?", 
+        (order_number,)
+    )
+    conn.commit()
+    conn.close()
+
+    await message.answer(
+        "Сборка отменена. Заказ удален.", 
+        reply_markup=get_admin_main_keyboard()
+    )
+    await state.clear()
+
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    import asyncio
+    asyncio.run(dp.start_polling(bot))
