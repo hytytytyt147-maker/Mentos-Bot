@@ -204,7 +204,7 @@ async def client_support(message: types.Message):
     builder = InlineKeyboardBuilder()
     builder.add(
         types.InlineKeyboardButton(
-            text="💬 Написать продавцу", url="https://t.me"
+            text="💬 Написать продавцу", url="https://t.me/@Mentos_Tetst_Bot"
         )
     )
     await message.answer(
