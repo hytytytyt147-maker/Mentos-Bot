@@ -52,6 +52,7 @@ def init_db():
 init_db()
 
 
+# ОШИБКА ИСПРАВЛЕНА ТУТ: Добавлен индекс [0], int() больше никогда не упадет!
 def get_target_chat():
     conn = sqlite3.connect("wb_shop.db")
     cursor = conn.cursor()
@@ -60,7 +61,7 @@ def get_target_chat():
     )
     row = cursor.fetchone()
     conn.close()
-    return int(row) if row else ADMIN_ID
+    return int(row[0]) if row else ADMIN_ID
 
 
 def update_target_chat(new_id):
@@ -69,7 +70,7 @@ def update_target_chat(new_id):
     cursor.execute(
         "INSERT OR REPLACE INTO settings (key, value) "
         "VALUES ('target_chat', ?)",
-        (new_id,),
+        (str(new_id),),
     )
     conn.commit()
     conn.close()
@@ -87,7 +88,6 @@ scheduler.add_job(daily_clean_job, "interval", hours=24)
 @dp.startup()
 async def on_startup():
     scheduler.start()
-# ИСПРАВЛЕНО ТУТ: Антиспам больше не блокирует массовую отправку фотографий!
 class AntiSpamMiddleware(BaseMiddleware):
 
     def __init__(self, limit: int = 2):
@@ -98,11 +98,8 @@ class AntiSpamMiddleware(BaseMiddleware):
     async def __call__(self, handler, event: types.Message, data: dict):
         if not event.from_user:
             return await handler(event, data)
-            
-        # Если клиент шлет ФОТО, мы пропускаем его без проверки на спам
         if event.photo:
             return await handler(event, data)
-            
         user_id = event.from_user.id
         now = time.time()
         if user_id in self.storage:
@@ -205,7 +202,6 @@ async def cmd_start(message: types.Message, state: FSMContext):
         )
 
 
-# ИСПРАВЛЕНО ТУТ: Текст полностью переписан на вежливый и понятный
 @dp.message(F.text == "🆘 Помощь / Поддержка")
 async def client_support(message: types.Message):
     builder = InlineKeyboardBuilder()
@@ -250,6 +246,7 @@ async def client_get_number(message: types.Message, state: FSMContext):
     )
 
 
+# ИСПРАВЛЕНО ТУТ: Бот больше не шлет сообщения при загрузке каждой фотографии!
 @dp.message(ClientStates.sending_photos, F.photo)
 async def client_handle_photo(message: types.Message, state: FSMContext):
     data = await state.get_data()
@@ -260,11 +257,8 @@ async def client_handle_photo(message: types.Message, state: FSMContext):
     await bot.download_file(file_info.file_path, local_path)
     paths.append(local_path)
     await state.update_data(photo_paths=paths)
-    if len(paths) % 5 == 0 or len(paths) == 1:
-        await message.answer(f"Принято фотографий: {len(paths)} шт.")
 
 
-# ИСПРАВЛЕНО ТУТ: Карточка отправки ссылок изменена по вашему шаблону (Дата заказа, Клиент)
 @dp.message(ClientStates.sending_photos, F.text.startswith("http"))
 async def client_handle_any_link(message: types.Message, state: FSMContext):
     data = await state.get_data()
@@ -295,6 +289,7 @@ async def client_handle_any_link(message: types.Message, state: FSMContext):
 
     await state.clear()
     await message.answer("🎉 Ваша ссылка успешно принята! Мы известим вас о готовности заказа.", reply_markup=get_client_main_kb())
+# ИСПРАВЛЕНО ТУТ: Полный контроль количества фото перенесен исключительно на эту кнопку!
 @dp.message(ClientStates.sending_photos, F.text == "✅ Завершить и отправить")
 async def client_pre_validate_upload(message: types.Message, state: FSMContext):
     data = await state.get_data()
@@ -312,16 +307,22 @@ async def client_pre_validate_upload(message: types.Message, state: FSMContext):
     if diff != 0:
         word = "больше" if diff > 0 else "меньше"
         msg = (
+            f"📊 **Контроль количества фотографий:**\n\n"
             f"Вы отправили: `{count}` шт.\n"
             f"Тариф: `{target_tariff}` шт.\n\n"
-            f"⚠️ Это на `{abs(diff)}` шт {word}. Отправить заказ?"
+            f"⚠️ Это на `{abs(diff)}` шт {word}. Отправить заказ продавцу?"
         )
         await message.answer(msg, reply_markup=get_confirm_upload_inline(), parse_mode="Markdown")
     else:
-        await execute_final_upload(message, state)
+        # Карточка точного совпадения (например, ровно 25, 50 или 100)
+        msg = (
+            f"📊 **Контроль количества фотографий:**\n\n"
+            f"Вы отправили ровно: `{count}` шт.\n"
+            f"Все лимиты тарифа совпадают! Отправить заказ продавцу?"
+        )
+        await message.answer(msg, reply_markup=get_confirm_upload_inline(), parse_mode="Markdown")
 
 
-# ИСПРАВЛЕНО ТУТ: Карточка ZIP-архива изменена по вашему шаблону (Дата заказа, Клиент)
 async def execute_final_upload(message: types.Message, state: FSMContext):
     data = await state.get_data()
     paths = data.get("photo_paths", [])
@@ -356,14 +357,15 @@ async def execute_final_upload(message: types.Message, state: FSMContext):
 @dp.callback_query(F.data == "confirm_force_send")
 async def cb_force_send(callback: types.CallbackQuery, state: FSMContext):
     await callback.answer()
-    await callback.message.delete()
+    # Исправлено: Ссылка на callback.message теперь полностью валидна
+    await bot.delete_message(chat_id=callback.message.chat.id, message_id=callback.message.message_id)
     await execute_final_upload(callback.message, state)
 
 
 @dp.callback_query(F.data == "confirm_keep_upload")
 async def cb_keep_upload(callback: types.CallbackQuery):
     await callback.answer()
-    await callback.message.delete()
+    await bot.delete_message(chat_id=callback.message.chat.id, message_id=callback.message.message_id)
     await callback.message.answer("Продолжайте отправку фотографий.")
 
 
