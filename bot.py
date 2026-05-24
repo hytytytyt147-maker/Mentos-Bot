@@ -14,7 +14,6 @@ from aiogram.utils.keyboard import ReplyKeyboardBuilder
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-# Точные данные авторизации вашего бота
 TOKEN = "8947024615:AAHf9RX5nl70knZ3aKy_4WRuhn5f83vHkIs"
 ADMIN_ID = 1924047464
 
@@ -33,7 +32,7 @@ def init_db():
         "CREATE TABLE IF NOT EXISTS orders ("
         "order_number TEXT PRIMARY KEY, "
         "status TEXT DEFAULT 'готовится', "
-        "photo_count INTEGER DEFAULT 0, "
+        "photo_count TEXT DEFAULT '0', " # Изменено на TEXT для ссылок
         "user_name TEXT, "
         "user_id INTEGER)"
     )
@@ -70,7 +69,7 @@ def update_target_chat(new_id):
     cursor.execute(
         "INSERT OR REPLACE INTO settings (key, value) "
         "VALUES ('target_chat', ?)",
-        (str(new_id),),
+        (new_id,),
     )
     conn.commit()
     conn.close()
@@ -150,7 +149,6 @@ def get_admin_kb():
     return builder.as_markup(resize_keyboard=True)
 
 
-# НОВОЕ: Генерация кнопок управления конкретным заказом
 def get_status_inline(order_id):
     builder = InlineKeyboardBuilder()
     builder.add(
@@ -160,12 +158,12 @@ def get_status_inline(order_id):
     )
     builder.add(
         types.InlineKeyboardButton(
-            text="✅ Готово (Оповестить)", callback_data=f"st_done_{order_id}"
+            text="✅ Готово", callback_data=f"st_done_{order_id}"
         )
     )
     builder.add(
         types.InlineKeyboardButton(
-            text="🗑️ Удалить заказ из списка", callback_data=f"st_del_{order_id}"
+            text="🗑️ Удалить заказ", callback_data=f"st_del_{order_id}"
         )
     )
     builder.adjust(2, 1)
@@ -211,8 +209,8 @@ async def client_support(message: types.Message):
     )
     await message.answer(
         "🆘 **Поддержка клиентов**\n\n"
-        "Отправьте номер вашего заказа WB, а затем загрузите фото.\n"
-        "Если возникли трудности — нажмите кнопку ниже:",
+        "Отправьте номер вашего заказа WB, а затем загрузите фото "
+        "или просто пришлите ссылку на Яндекс/Google Диск.",
         reply_markup=builder.as_markup(),
         parse_mode="Markdown",
     )
@@ -239,8 +237,9 @@ async def client_get_number(message: types.Message, state: FSMContext):
     await state.update_data(wb_num=num, photo_paths=[])
     await state.set_state(ClientStates.sending_photos)
     await message.answer(
-        f"Заказ №{num} привязан! Начните отправлять фотографии.\n"
-        "По окончании нажмите кнопку ниже:",
+        f"Заказ №{num} привязан!\n\n"
+        "Шаг 2: Начните отправлять фотографии "
+        "ИЛИ просто пришлите ссылку на Яндекс/Google Диск в ответном сообщении.",
         reply_markup=get_client_upload_kb(),
     )
 
@@ -259,6 +258,39 @@ async def client_handle_photo(message: types.Message, state: FSMContext):
         await message.answer(f"Принято фотографий: {len(paths)} шт.")
 
 
+# НОВОЕ: Перехват Ссылок на Облако (Яндекс, Гугл, Майл)
+@dp.message(ClientStates.sending_photos, F.text.contains("http"))
+async def client_handle_cloud_link(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    num = data.get("wb_num")
+    link = message.text.strip()
+    user_info = f"{message.from_user.full_name} (@{message.from_user.username})"
+    now_str = datetime.now().strftime("%d.%m.%Y %H:%M")
+
+    # Сохраняем ссылку в базу вместо количества фото
+    conn = sqlite3.connect("wb_shop.db")
+    cursor = conn.cursor()
+    cursor.execute("INSERT OR REPLACE INTO orders VALUES (?, 'готовится', 'Ссылка на диск', ?, ?)", (num, user_info, message.from_user.id))
+    conn.commit()
+    conn.close()
+
+    # Карточка заказа для вас в целевой чат
+    report_text = (
+        f"📥 **НОВЫЙ ЗАКАЗ ПО ССЫЛКЕ!**\n\n"
+        f"📦 **WB:** `{num}`\n"
+        f"🌐 **Ссылка на диск:** {link}\n"
+        f"📅 **Дата:** {now_str}\n"
+        f"👤 **Кто:** {user_info}\n"
+    )
+    
+    target = get_target_chat()
+    try:
+        await bot.send_message(chat_id=target, text=report_text, disable_web_page_preview=False)
+    except Exception as e:
+        await bot.send_message(chat_id=ADMIN_ID, text=f"Ошибка отправки: {e}")
+
+    await state.clear()
+    await message.answer("🎉 Ваша ссылка успешно отправлена продавцу! Мы известим вас о готовности заказа.", reply_markup=get_client_main_kb())
 @dp.message(ClientStates.sending_photos, F.text == "✅ Завершить и отправить")
 async def client_pre_validate_upload(message: types.Message, state: FSMContext):
     data = await state.get_data()
@@ -283,6 +315,8 @@ async def client_pre_validate_upload(message: types.Message, state: FSMContext):
         await message.answer(msg, reply_markup=get_confirm_upload_inline(), parse_mode="Markdown")
     else:
         await execute_final_upload(message, state)
+
+
 async def execute_final_upload(message: types.Message, state: FSMContext):
     data = await state.get_data()
     paths = data.get("photo_paths", [])
@@ -297,11 +331,11 @@ async def execute_final_upload(message: types.Message, state: FSMContext):
     user_info = f"{message.from_user.full_name} (@{message.from_user.username})"
     conn = sqlite3.connect("wb_shop.db")
     cursor = conn.cursor()
-    cursor.execute("INSERT OR REPLACE INTO orders VALUES (?, 'готовится', ?, ?, ?)", (num, len(paths), user_info, message.from_user.id))
+    cursor.execute("INSERT OR REPLACE INTO orders VALUES (?, 'готовится', ?, ?, ?)", (num, str(len(paths)), user_info, message.from_user.id))
     conn.commit()
     conn.close()
     now_str = datetime.now().strftime("%d.%m.%Y %H:%M")
-    report_text = f"📥 **НОВЫЙ ЗАКАЗ!**\n\n📦 **WB:** `{num}`\n📸 **Фото:** {len(paths)} шт.\n📅 **Дата:** {now_str}\n👤 **Кто:** {user_info}\n"
+    report_text = f"📥 **НОВЫЙ ЗАКАЗ (АРХИВ)!**\n\n📦 **WB:** `{num}`\n📸 **Фото:** {len(paths)} шт.\n📅 **Дата:** {now_str}\n👤 **Кто:** {user_info}\n"
     target = get_target_chat()
     try:
         input_file = types.FSInputFile(zip_name)
@@ -357,11 +391,10 @@ async def admin_all_orders(message: types.Message):
         return
     text = "📋 **Текущие заказы:**\n\n"
     for r in rows:
-        text += f"📦 №`{r[0]}` | Статус: *{r[1]}* | Фото: {r[2]} шт.\n"
+        text += f"📦 №`{r}` | Статус: *{r}* | Тип/Кол-во: {r}\n"
     await message.answer(text, parse_mode="Markdown")
 
 
-# НОВОЕ: Автоматический вывод всех заказов в виде кнопок! Вводить ничего не нужно
 @dp.message(F.text == "🔄 Изменить статус")
 async def admin_change_status_inline(message: types.Message):
     if message.from_user.id != ADMIN_ID: return
@@ -370,68 +403,49 @@ async def admin_change_status_inline(message: types.Message):
     cursor.execute("SELECT order_number, status FROM orders")
     rows = cursor.fetchall()
     conn.close()
-
     if not rows:
-        await message.answer("❌ Активных заказов для смены статуса нет.")
+        await message.answer("❌ Активных заказов нет.")
         return
-
     builder = InlineKeyboardBuilder()
     for r in rows:
-        icon = "⏳" if r[1] == "готовится" else "✅"
-        builder.add(types.InlineKeyboardButton(
-            text=f"{icon} №{r[0]}", callback_data=f"sel_ord_{r[0]}"
-        ))
+        icon = "⏳" if r == "готовится" else "✅"
+        builder.add(types.InlineKeyboardButton(text=f"{icon} №{r}", callback_data=f"sel_ord_{r}"))
     builder.adjust(1)
-    await message.answer("Выберите заказ из списка ниже для управления:", reply_markup=builder.as_markup())
+    await message.answer("Выберите заказ для управления:", reply_markup=builder.as_markup())
 
 
-# Открытие меню управления выбранным заказом
 @dp.callback_query(F.data.startswith("sel_ord_"))
 async def admin_select_order_menu(callback: types.CallbackQuery):
-    order_id = callback.data.split("_")[2]
+    order_id = callback.data.split("_")
     await callback.answer()
-    await callback.message.edit_text(
-        f"Управление заказом №`{order_id}`.\nВыберите нужное действие:",
-        reply_markup=get_status_inline(order_id), parse_mode="Markdown"
-    )
+    await callback.message.edit_text(f"Управление заказом №`{order_id}`:", reply_markup=get_status_inline(order_id), parse_mode="Markdown")
 
 
-# Обработка изменения статуса или УДАЛЕНИЯ заказа из списка
 @dp.callback_query(F.data.startswith("st_"))
 async def admin_confirm_status(callback: types.CallbackQuery):
     data = callback.data.split("_")
-    action = data[1]
-    order_id = data[2]
-
+    action = data
+    order_id = data
     conn = sqlite3.connect("wb_shop.db")
     cursor = conn.cursor()
-
     if action == "del":
-        # Полное удаление выданного/готового заказа из списка
         cursor.execute("DELETE FROM orders WHERE order_number=?", (order_id,))
         conn.commit()
         conn.close()
-        await callback.answer("Заказ успешно удален")
+        await callback.answer("Заказ удален")
         await callback.message.edit_text(f"🗑️ Заказ №`{order_id}` полностью удален из списка активных.", parse_mode="Markdown")
         return
-
     new_status = "готовится" if action == "prep" else "готово"
     cursor.execute("UPDATE orders SET status=? WHERE order_number=?", (new_status, order_id))
     cursor.execute("SELECT user_id FROM orders WHERE order_number=?", (order_id,))
     user_row = cursor.fetchone()
     conn.commit()
     conn.close()
-
     await callback.answer("Статус обновлен")
     await callback.message.edit_text(f"✅ Статус заказа №`{order_id}` изменен на *{new_status}*.", parse_mode="Markdown")
-
-    if action == "done" and user_row and user_row[0]:
+    if action == "done" and user_row and user_row:
         try:
-            await bot.send_message(
-                chat_id=int(user_row[0]), 
-                text=f"🎉 **Отличные новости!**\nВаш заказ фотографий №`{order_id}` полностью распечатан и готов к отправке!", 
-                parse_mode="Markdown"
-            )
+            await bot.send_message(chat_id=int(user_row), text=f"🎉 **Отличные новости!**\nВаш заказ фотографий №`{order_id}` готов к отправке!", parse_mode="Markdown")
         except Exception: pass
 
 
@@ -465,7 +479,7 @@ async def client_check_any_order(message: types.Message):
     row = cursor.fetchone()
     conn.close()
     if row:
-        await message.answer(f"📦 **Статус №{text}:**\n\nСостояние: *{row[0]}*\nФото: {row[1]} шт.", parse_mode="Markdown")
+        await message.answer(f"📦 **Статус №{text}:**\n\nСостояние: *{row}*\nТип/Кол-во: {row}", parse_mode="Markdown")
     else:
         await message.answer("❌ Заказ пока не найден.")
 
