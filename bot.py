@@ -6,6 +6,7 @@ import zipfile
 import shutil
 from datetime import datetime
 from aiogram import Bot, Dispatcher, F, types
+from aiogram import BaseMiddleware
 from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -13,7 +14,8 @@ from aiogram.utils.keyboard import ReplyKeyboardBuilder
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-TOKEN = "8947024615:AAHf9RX5nl70knZ3aKy_4WRuhn5f83vHkIs"
+# Точные данные
+TOKEN = "8947024615:AAHf9RX5nl70knZ3aKy_4WRuhn5f83v4bIs"
 ADMIN_ID = 1924047464
 
 bot = Bot(token=TOKEN)
@@ -59,7 +61,7 @@ def get_target_chat():
     )
     row = cursor.fetchone()
     conn.close()
-    return int(row) if row else ADMIN_ID
+    return int(row[0]) if row else ADMIN_ID
 
 
 def update_target_chat(new_id):
@@ -74,7 +76,6 @@ def update_target_chat(new_id):
     conn.close()
 
 
-# Автоматическая очистка папки раз в сутки (Пункт 4)
 async def daily_clean_job():
     if os.path.exists("temp_photos"):
         shutil.rmtree("temp_photos")
@@ -82,7 +83,33 @@ async def daily_clean_job():
 
 
 scheduler.add_job(daily_clean_job, "interval", hours=24)
-# scheduler.start()
+class AntiSpamMiddleware(BaseMiddleware):
+
+    def __init__(self, limit: int = 2):
+        self.limit = limit
+        self.storage = {}
+        super().__init__()
+
+    async def __call__(self, handler, event: types.Message, data: dict):
+        if not event.from_user:
+            return await handler(event, data)
+        user_id = event.from_user.id
+        now = time.time()
+        if user_id in self.storage:
+            last_time = self.storage[user_id]
+            if now - last_time < self.limit:
+                if user_id != ADMIN_ID:
+                    return await event.answer(
+                        "⚠️ Пожалуйста, не спамьте!"
+                    )
+                return
+        self.storage[user_id] = now
+        return await handler(event, data)
+
+
+dp.message.middleware(AntiSpamMiddleware(limit=1))
+
+
 class ClientStates(StatesGroup):
     waiting_for_wb_number = State()
     sending_photos = State()
@@ -137,7 +164,6 @@ def get_status_inline(order_id):
     return builder.as_markup()
 
 
-# Инлайн-кнопки подтверждения при несовпадении лимита фото
 def get_confirm_upload_inline():
     builder = InlineKeyboardBuilder()
     builder.add(
@@ -154,8 +180,6 @@ def get_confirm_upload_inline():
     )
     builder.adjust(1)
     return builder.as_markup()
-
-
 @dp.message(CommandStart())
 async def cmd_start(message: types.Message, state: FSMContext):
     await state.clear()
@@ -174,32 +198,33 @@ async def cmd_start(message: types.Message, state: FSMContext):
         )
 
 
-# Кнопка поддержки (Пункт 5)
 @dp.message(F.text == "🆘 Помощь / Поддержка")
 async def client_support(message: types.Message):
     builder = InlineKeyboardBuilder()
     builder.add(
         types.InlineKeyboardButton(
             text="💬 Написать продавцу",
-            url="https://t.me",  # Ваш юзернейм
+            url="https://t.me",
         )
     )
     await message.answer(
         "🆘 **Служба поддержки клиентов**\n\n"
-        "1. Номер заказа — это 14-20 значный цифровой номер "
-        "(сборочное задание) из вашего кабинета покупателя WB.\n"
+        "1. Номер заказа — это цифровой номер "
+        "из вашего кабинета покупателя WB.\n"
         "2. Если бот завис, нажмите команду /start заново.\n"
         "3. По любым другим вопросам жмите кнопку ниже:",
         reply_markup=builder.as_markup(),
         parse_mode="Markdown",
     )
+
+
 @dp.message(F.text == "📥 Отправить фотографии")
 async def client_start_upload(
     message: types.Message, state: FSMContext
 ):
     await state.set_state(ClientStates.waiting_for_wb_number)
     await message.answer(
-        "Шаг 1: Введите номер вашего заказа (сборочного задания) WB:",
+        "Шаг 1: Введите номер вашего заказа WB:",
         reply_markup=types.ReplyKeyboardRemove(),
     )
 
@@ -272,7 +297,6 @@ async def client_pre_validate_upload(
 
     diff = count - target_tariff
 
-    # Умный анализ отклонения количества фото
     if diff != 0:
         word = "больше" if diff > 0 else "меньше"
         msg = (
@@ -288,10 +312,7 @@ async def client_pre_validate_upload(
             parse_mode="Markdown",
         )
     else:
-        # Если количество ровно совпало с 25, 50 или 100 — шлем без вопросов
         await execute_final_upload(message, state)
-
-
 async def execute_final_upload(message: types.Message, state: FSMContext):
     data = await state.get_data()
     paths = data.get("photo_paths", [])
@@ -313,7 +334,7 @@ async def execute_final_upload(message: types.Message, state: FSMContext):
 
     user_info = (
         f"{message.from_user.full_name} "
-        f" pores (@{message.from_user.username})"
+        f"(@{message.from_user.username})"
     )
     conn = sqlite3.connect("wb_shop.db")
     cursor = conn.cursor()
@@ -354,6 +375,8 @@ async def execute_final_upload(message: types.Message, state: FSMContext):
         "🎉 Ваш заказ успешно отправлен продавцу!\n"
         "Мы известим вас здесь, когда фотографии будут распечатаны."
     )
+
+
 @dp.callback_query(F.data == "confirm_force_send")
 async def cb_force_send(callback: types.CallbackQuery, state: FSMContext):
     await callback.answer("Отправка подтверждена")
@@ -409,8 +432,8 @@ async def admin_all_orders(message: types.Message):
     text = "📋 **Текущие заказы на печать:**\n\n"
     for r in rows:
         text += (
-            f"📦 №`{r}` | Статус: *{r}* | "
-            f"Фото: {r} шт.\n"
+            f"📦 №`{r[0]}` | Статус: *{r[1]}* | "
+            f"Фото: {r[2]} шт.\n"
         )
     await message.answer(text, parse_mode="Markdown")
 
@@ -453,11 +476,12 @@ async def admin_change_status_get_id(
     )
 
 
+# ТУТ ИСПРАВЛЕНА ОШИБКА ИНДЕКСОВ [0] и [2]
 @dp.callback_query(F.data.startswith("st_"))
 async def admin_confirm_status(callback: types.CallbackQuery):
     data = callback.data.split("_")
-    action = data
-    order_id = data
+    action = data[1]
+    order_id = data[2]
 
     new_status = "готовится" if action == "prep" else "готово"
 
@@ -479,10 +503,10 @@ async def admin_confirm_status(callback: types.CallbackQuery):
         parse_mode="Markdown",
     )
 
-    if action == "done" and user_row and user_row:
+    if action == "done" and user_row and user_row[0]:
         try:
             await bot.send_message(
-                chat_id=int(user_row),
+                chat_id=int(user_row[0]),
                 text=f"🎉 **Отличные новости!**\n"
                 f"Ваш заказ фотографий №`{order_id}` распечатан "
                 f"и готов к отправке через Wildberries!",
@@ -536,8 +560,8 @@ async def client_check_any_order(message: types.Message):
     if row:
         await message.answer(
             f"📦 **Статус заказа №{text}:**\n\n"
-            f"Состояние: *{row}*\n"
-            f"Всего фотографий: {row} шт.",
+            f"Состояние: *{row[0]}*\n"
+            f"Всего фотографий: {row[1]} шт.",
             parse_mode="Markdown",
         )
     else:
@@ -549,4 +573,5 @@ async def client_check_any_order(message: types.Message):
 if __name__ == "__main__":
     import asyncio
 
+    scheduler.start()
     asyncio.run(dp.start_polling(bot))
