@@ -11,7 +11,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from barcode import generate
 from barcode.writer import ImageWriter
 
-TOKEN = "6847024615:AAHF9RX5n17QknZx3ky_4kRuHn5f83v4bIs"
+TOKEN = "8947024615:AAHf9RX5nl70knZ3aKy_4WRuhn5f83vHkIs"
 ADMIN_ID = 1924047464
 
 bot = Bot(token=TOKEN)
