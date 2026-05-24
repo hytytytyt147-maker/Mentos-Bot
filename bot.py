@@ -11,7 +11,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from barcode import generate
 from barcode.writer import ImageWriter
 
-TOKEN = "8947024615:AAHf9RX5nl70knZ3aKy_4WRuhn5f83vHkIs"
+TOKEN = "6847024615:AAHF9RX5n17QknZx3ky_4kRuHn5f83v4bIs"
 ADMIN_ID = 1924047464
 
 bot = Bot(token=TOKEN)
@@ -52,7 +52,7 @@ def get_setting(key):
     )
     row = cursor.fetchone()
     conn.close()
-    return row if row else str(ADMIN_ID)
+    return row[0] if row else str(ADMIN_ID)
 
 
 def update_setting(key, value):
@@ -65,8 +65,6 @@ def update_setting(key, value):
     )
     conn.commit()
     conn.close()
-
-
 class AntiSpamMiddleware(BaseMiddleware):
 
     def __init__(self, limit: int = 2):
@@ -146,6 +144,8 @@ def get_assembly_keyboard():
         resize_keyboard=True,
         input_field_placeholder="Загрузите фото...",
     )
+
+
 @dp.message(CommandStart())
 async def cmd_start(message: types.Message, state: FSMContext):
     await state.clear()
@@ -158,7 +158,8 @@ async def cmd_start(message: types.Message, state: FSMContext):
     else:
         await message.answer(
             f"Привет, {message.from_user.first_name}!\n"
-            "Система отслеживания готовности заказов.",
+            "Это система проверки готовности заказов.\n"
+            "Чтобы узнать статус, просто отправьте номер заказа.",
             reply_markup=types.ReplyKeyboardRemove(),
         )
 
@@ -185,8 +186,6 @@ async def show_all_orders_text(message: types.Message):
             f"Фото: {row[2]} шт.\n"
         )
     await message.answer(report, parse_mode="Markdown")
-
-
 @dp.message(F.text == "⚙️ Admin Панель")
 async def open_admin_panel(message: types.Message):
     if message.from_user.id != ADMIN_ID:
@@ -439,6 +438,35 @@ async def cancel_assembly(message: types.Message, state: FSMContext):
         reply_markup=get_admin_main_keyboard(),
     )
     await state.clear()
+
+
+@dp.message(F.text)
+async def client_check_order(message: types.Message):
+    if message.from_user.id == ADMIN_ID:
+        return
+    text = message.text.strip()
+    if not text.isdigit():
+        await message.answer("Введите цифровой номер заказа:")
+        return
+    conn = sqlite3.connect("bot_database.db")
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT status, photo_count FROM orders WHERE order_number = ?",
+        (text,),
+    )
+    row = cursor.fetchone()
+    conn.close()
+    if row:
+        await message.answer(
+            f"📦 **Информация о заказе №{text}:**\n\n"
+            f"Статус: *{row[0]}*\n"
+            f"Загружено фотографий: {row[1]} шт.",
+            parse_mode="Markdown",
+        )
+    else:
+        await message.answer(
+            "❌ Заказ с таким номером пока не найден в системе."
+        )
 
 
 if __name__ == "__main__":
