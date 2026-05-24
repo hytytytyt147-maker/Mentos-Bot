@@ -1,7 +1,8 @@
 import io
 import time
 import sqlite3
-from aiogram import Bot, Dispatcher, F, types, BaseMiddleware
+from aiogram import Bot, Dispatcher, F, types
+from aiogram import BaseMiddleware
 from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -16,62 +17,58 @@ ADMIN_ID = 1924047464
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
-# ==========================================
-# 1. БАЗА ДАННЫХ (SQLite)
-# ==========================================
+
 def init_db():
     conn = sqlite3.connect("bot_database.db")
     cursor = conn.cursor()
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS orders (
-            order_number TEXT PRIMARY KEY,
-            status TEXT DEFAULT 'готовится',
-            photo_count INTEGER DEFAULT 0,
-            user_id INTEGER
-        )
-    ''')
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS settings (
-            key TEXT PRIMARY KEY,
-            value TEXT
-        )
-    ''')
+    cursor.execute(
+        "CREATE TABLE IF NOT EXISTS orders ("
+        "order_number TEXT PRIMARY KEY, "
+        "status TEXT DEFAULT 'готовится', "
+        "photo_count INTEGER DEFAULT 0, "
+        "user_id INTEGER)"
+    )
+    cursor.execute(
+        "CREATE TABLE IF NOT EXISTS settings ("
+        "key TEXT PRIMARY KEY, value TEXT)"
+    )
     cursor.execute(
         "INSERT OR IGNORE INTO settings (key, value) "
-        "VALUES ('archive_chat_id', ?)", 
-        (str(ADMIN_ID),)
+        "VALUES ('archive_chat_id', ?)",
+        (str(ADMIN_ID),),
     )
     conn.commit()
     conn.close()
 
+
 init_db()
+
 
 def get_setting(key):
     conn = sqlite3.connect("bot_database.db")
     cursor = conn.cursor()
     cursor.execute(
-        "SELECT value FROM settings WHERE key = ?", 
-        (key,)
+        "SELECT value FROM settings WHERE key = ?", (key,)
     )
     row = cursor.fetchone()
     conn.close()
-    return row[0] if row else str(ADMIN_ID)
+    return row if row else str(ADMIN_ID)
+
 
 def update_setting(key, value):
     conn = sqlite3.connect("bot_database.db")
     cursor = conn.cursor()
     cursor.execute(
         "INSERT OR REPLACE INTO settings (key, value) "
-        "VALUES (?, ?)", 
-        (key, value)
+        "VALUES (?, ?)",
+        (key, value),
     )
     conn.commit()
     conn.close()
 
-# ==========================================
-# 2. ЗАЩИТА ОТ СПАМА (Middleware)
-# ==========================================
+
 class AntiSpamMiddleware(BaseMiddleware):
+
     def __init__(self, limit: int = 2):
         self.limit = limit
         self.storage = {}
@@ -80,10 +77,8 @@ class AntiSpamMiddleware(BaseMiddleware):
     async def __call__(self, handler, event: types.Message, data: dict):
         if not event.from_user:
             return await handler(event, data)
-        
         user_id = event.from_user.id
         now = time.time()
-        
         if user_id in self.storage:
             last_time = self.storage[user_id]
             if now - last_time < self.limit:
@@ -92,22 +87,22 @@ class AntiSpamMiddleware(BaseMiddleware):
                         "⚠️ Пожалуйста, не спамьте!"
                     )
                 return
-        
         self.storage[user_id] = now
         return await handler(event, data)
 
+
 dp.message.middleware(AntiSpamMiddleware(limit=1))
 
-# ==========================================
-# 3. СОСТОЯНИЯ И КЛАВИАТУРЫ
-# ==========================================
+
 class OrderStates(StatesGroup):
     waiting_for_order_number = State()
     uploading_photos = State()
 
+
 class AdminStates(StatesGroup):
     waiting_for_archive_chat = State()
     waiting_for_status_order = State()
+
 
 def get_admin_main_keyboard():
     builder = ReplyKeyboardBuilder()
@@ -117,22 +112,30 @@ def get_admin_main_keyboard():
     builder.adjust(1, 2)
     return builder.as_markup(resize_keyboard=True)
 
+
 def get_admin_panel_inline():
     builder = InlineKeyboardBuilder()
-    builder.add(types.InlineKeyboardButton(
-        text="📁 Изменить чат архивов", 
-        callback_data="admin_change_chat"
-    ))
-    builder.add(types.InlineKeyboardButton(
-        text="🔄 Изменить статус заказа", 
-        callback_data="admin_change_status"
-    ))
-    builder.add(types.InlineKeyboardButton(
-        text="🗑️ Очистить базу заказов", 
-        callback_data="admin_clear_orders"
-    ))
+    builder.add(
+        types.InlineKeyboardButton(
+            text="📁 Изменить чат архивов",
+            callback_data="admin_change_chat",
+        )
+    )
+    builder.add(
+        types.InlineKeyboardButton(
+            text="🔄 Изменить статус заказа",
+            callback_data="admin_change_status",
+        )
+    )
+    builder.add(
+        types.InlineKeyboardButton(
+            text="🗑️ Очистить базу заказов",
+            callback_data="admin_clear_orders",
+        )
+    )
     builder.adjust(1)
     return builder.as_markup()
+
 
 def get_assembly_keyboard():
     builder = ReplyKeyboardBuilder()
@@ -140,44 +143,40 @@ def get_assembly_keyboard():
     builder.add(types.KeyboardButton(text="Отменить заказ"))
     builder.adjust(1, 1)
     return builder.as_markup(
-        resize_keyboard=True, 
-        input_field_placeholder="Загрузите фото..."
+        resize_keyboard=True,
+        input_field_placeholder="Загрузите фото...",
     )
-
-# ==========================================
-# 4. ХЕНДЛЕРЫ: СТАРТ И ОБЫЧНЫЕ ПОЛЬЗОВАТЕЛИ
-# ==========================================
 @dp.message(CommandStart())
 async def cmd_start(message: types.Message, state: FSMContext):
     await state.clear()
-    
     if message.from_user.id == ADMIN_ID:
         await message.answer(
             f"Привет, Администратор {message.from_user.first_name}!\n"
             "Вы вошли в систему инвентаризации WB.",
-            reply_markup=get_admin_main_keyboard()
+            reply_markup=get_admin_main_keyboard(),
         )
     else:
         await message.answer(
             f"Привет, {message.from_user.first_name}!\n"
             "Система отслеживания готовности заказов.",
-            reply_markup=types.ReplyKeyboardRemove()
+            reply_markup=types.ReplyKeyboardRemove(),
         )
+
 
 @dp.message(F.text == "📋 Все заказы")
 async def show_all_orders_text(message: types.Message):
-    if message.from_user.id != ADMIN_ID: return
-    
+    if message.from_user.id != ADMIN_ID:
+        return
     conn = sqlite3.connect("bot_database.db")
     cursor = conn.cursor()
-    cursor.execute("SELECT order_number, status, photo_count FROM orders")
+    cursor.execute(
+        "SELECT order_number, status, photo_count FROM orders"
+    )
     rows = cursor.fetchall()
     conn.close()
-    
     if not rows:
         await message.answer("📭 Список заказов пуст.")
         return
-        
     report = "📊 **Список текущих заказов:**\n\n"
     for row in rows:
         report += (
@@ -185,42 +184,46 @@ async def show_all_orders_text(message: types.Message):
             f"Статус: *{row[1]}* | "
             f"Фото: {row[2]} шт.\n"
         )
-    
     await message.answer(report, parse_mode="Markdown")
+
 
 @dp.message(F.text == "⚙️ Admin Панель")
 async def open_admin_panel(message: types.Message):
-    if message.from_user.id != ADMIN_ID: return
+    if message.from_user.id != ADMIN_ID:
+        return
     current_chat = get_setting("archive_chat_id")
     await message.answer(
         f"⚙️ **Панель настроек**\n\n"
         f"ID отправки архивов: `{current_chat}`",
         reply_markup=get_admin_panel_inline(),
-        parse_mode="Markdown"
+        parse_mode="Markdown",
     )
 
-# ==========================================
-# 5. ЛОГИКА НАСТРОЕК (CALLBACKS)
-# ==========================================
+
 @dp.callback_query(F.data == "admin_change_chat")
 async def admin_change_chat_step1(
     callback: types.CallbackQuery, state: FSMContext
 ):
     await callback.answer()
     await state.set_state(AdminStates.waiting_for_archive_chat)
-    await callback.message.answer("Введите новый Telegram ID чата:")
+    await callback.message.answer("Введите новый ID чата:")
+
 
 @dp.message(AdminStates.waiting_for_archive_chat)
-async def admin_change_chat_step2(message: types.Message, state: FSMContext):
-    if message.from_user.id != ADMIN_ID: return
+async def admin_change_chat_step2(
+    message: types.Message, state: FSMContext
+):
+    if message.from_user.id != ADMIN_ID:
+        return
     new_chat = message.text.strip()
     update_setting("archive_chat_id", new_chat)
     await state.clear()
     await message.answer(
-        f"✅ Чат изменен на: `{new_chat}`", 
-        parse_mode="Markdown", 
-        reply_markup=get_admin_main_keyboard()
+        f"✅ Чат изменен на: `{new_chat}`",
+        parse_mode="Markdown",
+        reply_markup=get_admin_main_keyboard(),
     )
+
 
 @dp.callback_query(F.data == "admin_clear_orders")
 async def admin_clear_orders(callback: types.CallbackQuery):
@@ -231,24 +234,28 @@ async def admin_clear_orders(callback: types.CallbackQuery):
     conn.close()
     await callback.answer("🗑️ Все заказы удалены", show_alert=True)
 
+
 @dp.callback_query(F.data == "admin_change_status")
 async def admin_status_step1(
     callback: types.CallbackQuery, state: FSMContext
 ):
     await callback.answer()
     await state.set_state(AdminStates.waiting_for_status_order)
-    await callback.message.answer("Введите номер изменяемого заказа:")
+    await callback.message.answer("Введите номер заказа:")
+
 
 @dp.message(AdminStates.waiting_for_status_order)
-async def admin_status_step2(message: types.Message, state: FSMContext):
-    if message.from_user.id != ADMIN_ID: return
+async def admin_status_step2(
+    message: types.Message, state: FSMContext
+):
+    if message.from_user.id != ADMIN_ID:
+        return
     order_id = message.text.strip()
-    
     conn = sqlite3.connect("bot_database.db")
     cursor = conn.cursor()
     cursor.execute(
-        "SELECT order_number FROM orders WHERE order_number = ?", 
-        (order_id,)
+        "SELECT order_number FROM orders WHERE order_number = ?",
+        (order_id,),
     )
     if not cursor.fetchone():
         await message.answer("❌ Заказ с таким номером не найден.")
@@ -256,206 +263,185 @@ async def admin_status_step2(message: types.Message, state: FSMContext):
         await state.clear()
         return
     conn.close()
-    
     builder = InlineKeyboardBuilder()
-    builder.add(types.InlineKeyboardButton(
-        text="⏳ Готовится", 
-        callback_data=f"set_stat_prep_{order_id}"
-    ))
-    builder.add(types.InlineKeyboardButton(
-        text="✅ Готово", 
-        callback_data=f"set_stat_done_{order_id}"
-    ))
+    builder.add(
+        types.InlineKeyboardButton(
+            text="⏳ Готовится",
+            callback_data=f"set_stat_prep_{order_id}",
+        )
+    )
+    builder.add(
+        types.InlineKeyboardButton(
+            text="✅ Готово",
+            callback_data=f"set_stat_done_{order_id}",
+        )
+    )
     builder.adjust(2)
-    
     await state.clear()
     await message.answer(
-        f"Выберите статус для №{order_id}:", 
-        reply_markup=builder.as_markup()
+        f"Выберите статус для №{order_id}:",
+        reply_markup=builder.as_markup(),
     )
+
 
 @dp.callback_query(F.data.startswith("set_stat_"))
 async def admin_status_confirm(callback: types.CallbackQuery):
     data = callback.data.split("_")
     status_type = data[2]
     order_id = data[3]
-    
-    new_status = "готовится" if status_type == "prep" else "готово"
-    
+    new_status = (
+        "готовится" if status_type == "prep" else "готово"
+    )
     conn = sqlite3.connect("bot_database.db")
     cursor = conn.cursor()
     cursor.execute(
-        "UPDATE orders SET status = ? WHERE order_number = ?", 
-        (new_status, order_id)
+        "UPDATE orders SET status = ? WHERE order_number = ?",
+        (new_status, order_id),
     )
     conn.commit()
     conn.close()
-    
     await callback.answer(f"Статус изменен на '{new_status}'")
     await callback.message.edit_text(
-        f"✅ Статус заказа №`{order_id}` изменен на *{new_status}*.", 
-        parse_mode="Markdown"
+        f"✅ Статус заказа №`{order_id}` изменен на *{new_status}*.",
+        parse_mode="Markdown",
     )
 
-# ==========================================
-# 6. СБОРКА И ПРОВЕРКА ВВОДА НОМЕРА
-# ==========================================
+
 @dp.message(F.text == "⚡ Начать сборку")
 async def start_assembly(message: types.Message, state: FSMContext):
-    if message.from_user.id != ADMIN_ID: return
+    if message.from_user.id != ADMIN_ID:
+        return
     await state.set_state(OrderStates.waiting_for_order_number)
     await message.answer(
-        "Шаг 1: Введите или отсканируйте номер заказа:", 
-        reply_markup=types.ReplyKeyboardRemove()
+        "Шаг 1: Введите номер заказа:",
+        reply_markup=types.ReplyKeyboardRemove(),
+    )
+
+
 @dp.message(OrderStates.waiting_for_order_number)
-async def process_order_number(message: types.Message, state: FSMContext):
-    if message.from_user.id != ADMIN_ID: 
+async def process_order_number(
+    message: types.Message, state: FSMContext
+):
+    if message.from_user.id != ADMIN_ID:
         return
-
-    # Защита от пустого сообщения
     if not message.text:
-        await message.answer(
-            "⚠️ Вы прислали пустую строку или не текст.\n"
-            "Пожалуйста, введите корректный номер заказа:"
-        )
+        await message.answer("⚠️ Введите корректный номер заказа:")
         return
-
     order_number = message.text.strip()
-
-    # Проверка: только цифры
     if not order_number.isdigit():
         await message.answer(
-            "❌ Ошибка! Номер заказа должен состоять ТОЛЬКО из цифр.\n"
-            "Вы ввели буквы или спецсимволы. Попробуйте ещё раз:"
+            "❌ Ошибка! Номер должен состоять ТОЛЬКО из цифр:"
         )
         return
-
-    # Проверка длины сборочного задания WB (от 5 до 25 цифр)
     if len(order_number) < 5 or len(order_number) > 25:
-        await message.answer(
-            "⚠️ Неверный формат! Номер слишком короткий или длинный.\n"
-            "Перепроверьте номер и введите его заново:"
-        )
+        await message.answer("⚠️ Неверный формат! Введите заново:")
         return
-
     try:
         fp = io.BytesIO()
         generate(
-            'code128', 
-            order_number, 
-            writer=ImageWriter(), 
-            output=fp, 
-            text=order_number
+            "code128",
+            order_number,
+            writer=ImageWriter(),
+            output=fp,
+            text=order_number,
         )
         fp.seek(0)
         photo = types.BufferedInputFile(
-            fp.read(), 
-            filename="barcode.png"
+            fp.read(), filename="barcode.png"
         )
         await message.answer_photo(
-            photo=photo, 
-            caption=f"Штрихкод для заказа №{order_number}."
+            photo=photo, caption=f"Штрихкод для заказа №{order_number}."
         )
     except Exception as e:
         await message.answer(f"Ошибка штрихкода: {e}")
-
     conn = sqlite3.connect("bot_database.db")
     cursor = conn.cursor()
     cursor.execute(
         "INSERT OR REPLACE INTO orders "
         "(order_number, status, photo_count, user_id) "
-        "VALUES (?, 'готовится', 0, ?)", 
-        (order_number, message.from_user.id)
+        "VALUES (?, 'готовится', 0, ?)",
+        (order_number, message.from_user.id),
     )
     conn.commit()
     conn.close()
-
     await state.update_data(order_number=order_number, photos=[])
     await state.set_state(OrderStates.uploading_photos)
     await message.answer(
-        f"Заказ №{order_number} открыт. Отправляйте фото товара.\n"
-        "По окончании нажмите «Подтвердить отправку».", 
-        reply_markup=get_assembly_keyboard()
+        f"Заказ №{order_number} открыт. Отправляйте фото товара.",
+        reply_markup=get_assembly_keyboard(),
     )
 
 
 @dp.message(OrderStates.uploading_photos, F.photo)
 async def handle_photo(message: types.Message, state: FSMContext):
-    if message.from_user.id != ADMIN_ID: 
+    if message.from_user.id != ADMIN_ID:
         return
-
     user_data = await state.get_data()
     photos_list = user_data.get("photos", [])
     photos_list.append(message.photo[-1].file_id)
     await state.update_data(photos=photos_list)
-
     order_number = user_data.get("order_number")
     conn = sqlite3.connect("bot_database.db")
     cursor = conn.cursor()
     cursor.execute(
-        "UPDATE orders SET photo_count = ? WHERE order_number = ?", 
-        (len(photos_list), order_number)
+        "UPDATE orders SET photo_count = ? WHERE order_number = ?",
+        (len(photos_list), order_number),
     )
     conn.commit()
     conn.close()
-
     await message.answer(f"Фото добавлено (всего: {len(photos_list)})")
 
 
-@dp.message(OrderStates.uploading_photos, F.text == "Подтвердить отправку")
+@dp.message(
+    OrderStates.uploading_photos, F.text == "Подтвердить отправку"
+)
 async def confirm_assembly(message: types.Message, state: FSMContext):
-    if message.from_user.id != ADMIN_ID: 
+    if message.from_user.id != ADMIN_ID:
         return
-
     user_data = await state.get_data()
     order_number = user_data.get("order_number")
     photos_list = user_data.get("photos", [])
-
     if not photos_list:
         await message.answer("Загрузите хотя бы одно фото товара.")
         return
-
     archive_target = get_setting("archive_chat_id")
-
     try:
         await bot.send_message(
-            chat_id=archive_target, 
-            text=f"📦 Архив заказа №{order_number}. Фото: {len(photos_list)}"
+            chat_id=archive_target,
+            text=f"📦 Архив заказа №{order_number}. "
+            f"Фото: {len(photos_list)}",
         )
     except Exception:
         pass
-
     await message.answer(
-        f"✅ Сборка заказа №{order_number} завершена!", 
-        reply_markup=get_admin_main_keyboard()
+        f"✅ Сборка заказа №{order_number} завершена!",
+        reply_markup=get_admin_main_keyboard(),
     )
     await state.clear()
 
 
 @dp.message(OrderStates.uploading_photos, F.text == "Отменить заказ")
 async def cancel_assembly(message: types.Message, state: FSMContext):
-    if message.from_user.id != ADMIN_ID: 
+    if message.from_user.id != ADMIN_ID:
         return
-
     user_data = await state.get_data()
     order_number = user_data.get("order_number")
-
     conn = sqlite3.connect("bot_database.db")
     cursor = conn.cursor()
     cursor.execute(
-        "DELETE FROM orders WHERE order_number = ?", 
-        (order_number,)
+        "DELETE FROM orders WHERE order_number = ?",
+        (order_number,),
     )
     conn.commit()
     conn.close()
-
     await message.answer(
-        "Сборка отменена. Заказ удален.", 
-        reply_markup=get_admin_main_keyboard()
+        "Сборка отменена. Заказ удален.",
+        reply_markup=get_admin_main_keyboard(),
     )
     await state.clear()
 
 
 if __name__ == "__main__":
     import asyncio
+
     asyncio.run(dp.start_polling(bot))
