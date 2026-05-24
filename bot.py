@@ -3,6 +3,7 @@ import os
 import time
 import sqlite3
 import zipfile
+import shutil
 from datetime import datetime
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import CommandStart
@@ -10,13 +11,14 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.utils.keyboard import ReplyKeyboardBuilder
 from aiogram.utils.keyboard import InlineKeyboardBuilder
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-# Вставляем ваш точный рабочий токен
-TOKEN = "8947024615:AAHf9RX5nl70knZ3aKy_4WRuhn5f83vHkIs"
+TOKEN = "8947024615:AAHf9RX5nl70knZ3aKy_4WRuhn5f83v4bIs"
 ADMIN_ID = 1924047464
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
+scheduler = AsyncIOScheduler()
 
 if not os.path.exists("temp_photos"):
     os.makedirs("temp_photos")
@@ -57,7 +59,7 @@ def get_target_chat():
     )
     row = cursor.fetchone()
     conn.close()
-    return int(row[0]) if row else ADMIN_ID
+    return int(row) if row else ADMIN_ID
 
 
 def update_target_chat(new_id):
@@ -70,6 +72,17 @@ def update_target_chat(new_id):
     )
     conn.commit()
     conn.close()
+
+
+# Автоматическая очистка папки раз в сутки (Пункт 4)
+async def daily_clean_job():
+    if os.path.exists("temp_photos"):
+        shutil.rmtree("temp_photos")
+        os.makedirs("temp_photos")
+
+
+scheduler.add_job(daily_clean_job, "interval", hours=24)
+scheduler.start()
 class ClientStates(StatesGroup):
     waiting_for_wb_number = State()
     sending_photos = State()
@@ -84,6 +97,7 @@ def get_client_main_kb():
     builder = ReplyKeyboardBuilder()
     builder.add(types.KeyboardButton(text="📥 Отправить фотографии"))
     builder.add(types.KeyboardButton(text="📦 Проверить мой заказ"))
+    builder.add(types.KeyboardButton(text="🆘 Помощь / Поддержка"))
     builder.adjust(1)
     return builder.as_markup(resize_keyboard=True)
 
@@ -123,6 +137,25 @@ def get_status_inline(order_id):
     return builder.as_markup()
 
 
+# Инлайн-кнопки подтверждения при несовпадении лимита фото
+def get_confirm_upload_inline():
+    builder = InlineKeyboardBuilder()
+    builder.add(
+        types.InlineKeyboardButton(
+            text="🚀 Да, отправить как есть",
+            callback_data="confirm_force_send",
+        )
+    )
+    builder.add(
+        types.InlineKeyboardButton(
+            text="📸 Нет, дозагрузить еще",
+            callback_data="confirm_keep_upload",
+        )
+    )
+    builder.adjust(1)
+    return builder.as_markup()
+
+
 @dp.message(CommandStart())
 async def cmd_start(message: types.Message, state: FSMContext):
     await state.clear()
@@ -141,6 +174,25 @@ async def cmd_start(message: types.Message, state: FSMContext):
         )
 
 
+# Кнопка поддержки (Пункт 5)
+@dp.message(F.text == "🆘 Помощь / Поддержка")
+async def client_support(message: types.Message):
+    builder = InlineKeyboardBuilder()
+    builder.add(
+        types.InlineKeyboardButton(
+            text="💬 Написать продавцу",
+            url="https://t.me",  # Ваш юзернейм
+        )
+    )
+    await message.answer(
+        "🆘 **Служба поддержки клиентов**\n\n"
+        "1. Номер заказа — это 14-20 значный цифровой номер "
+        "(сборочное задание) из вашего кабинета покупателя WB.\n"
+        "2. Если бот завис, нажмите команду /start заново.\n"
+        "3. По любым другим вопросам жмите кнопку ниже:",
+        reply_markup=builder.as_markup(),
+        parse_mode="Markdown",
+    )
 @dp.message(F.text == "📥 Отправить фотографии")
 async def client_start_upload(
     message: types.Message, state: FSMContext
@@ -156,7 +208,6 @@ async def client_start_upload(
 async def client_get_number(
     message: types.Message, state: FSMContext
 ):
-    # Исправлено: жесткая защита от не-текстовых сообщений (фотографий)
     if not message.text:
         await message.answer(
             "⚠️ Ошибка! Пожалуйста, отправьте номер заказа "
@@ -177,6 +228,8 @@ async def client_get_number(
         "Когда отправите ВСЕ фотографии, нажмите кнопку ниже:",
         reply_markup=get_client_upload_kb(),
     )
+
+
 @dp.message(ClientStates.sending_photos, F.photo)
 async def client_handle_photo(
     message: types.Message, state: FSMContext
@@ -200,19 +253,53 @@ async def client_handle_photo(
 @dp.message(
     ClientStates.sending_photos, F.text == "✅ Завершить и отправить"
 )
-async def client_finish_upload(
+async def client_pre_validate_upload(
     message: types.Message, state: FSMContext
 ):
     data = await state.get_data()
     paths = data.get("photo_paths", [])
-    num = data.get("wb_num")
 
     if not paths:
         await message.answer("Вы не отправили ни одной фотографии!")
         return
 
+    count = len(paths)
+    target_tariff = 25
+    if count >= 30 and count <= 70:
+        target_tariff = 50
+    elif count > 70:
+        target_tariff = 100
+
+    diff = count - target_tariff
+
+    # Умный анализ отклонения количества фото
+    if diff != 0:
+        word = "больше" if diff > 0 else "меньше"
+        msg = (
+            f"📊 **Анализ количества фотографий:**\n\n"
+            f"Вы отправили: `{count}` шт.\n"
+            f"Ближайший тариф: `{target_tariff}` шт.\n\n"
+            f"⚠️ Это на `{abs(diff)}` шт {word}, чем нужно для тарифа. "
+            f"Вы уверены, что хотите отправить заказ в таком виде?"
+        )
+        await message.answer(
+            msg,
+            reply_markup=get_confirm_upload_inline(),
+            parse_mode="Markdown",
+        )
+    else:
+        # Если количество ровно совпало с 25, 50 или 100 — шлем без вопросов
+        await execute_final_upload(message, state)
+
+
+async def execute_final_upload(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    paths = data.get("photo_paths", [])
+    num = data.get("wb_num")
+
     await message.answer(
-        "⏳ Создаю архив и отправляю владельцу магазина... Подождите."
+        "⏳ Создаю ZIP-архив и отправляю продавцу... Подождите.",
+        reply_markup=get_client_main_kb(),
     )
 
     zip_name = f"Order_{num}.zip"
@@ -226,7 +313,7 @@ async def client_finish_upload(
 
     user_info = (
         f"{message.from_user.full_name} "
-        f"(@{message.from_user.username})"
+        f" pores (@{message.from_user.username})"
     )
     conn = sqlite3.connect("wb_shop.db")
     cursor = conn.cursor()
@@ -251,7 +338,6 @@ async def client_finish_upload(
     target = get_target_chat()
     try:
         input_file = types.FSInputFile(zip_name)
-        # Исправлено: добавлен обязательный аргумент text / caption
         await bot.send_document(
             chat_id=target, document=input_file, caption=report_text
         )
@@ -265,9 +351,23 @@ async def client_finish_upload(
 
     await state.clear()
     await message.answer(
-        "🎉 Ваш заказ успешно отправлен в обработку!\n"
-        "Мы известим вас здесь, когда фотографии будут распечатаны.",
-        reply_markup=get_client_main_kb(),
+        "🎉 Ваш заказ успешно отправлен продавцу!\n"
+        "Мы известим вас здесь, когда фотографии будут распечатаны."
+    )
+@dp.callback_query(F.data == "confirm_force_send")
+async def cb_force_send(callback: types.CallbackQuery, state: FSMContext):
+    await callback.answer("Отправка подтверждена")
+    await callback.message.delete()
+    await execute_final_upload(callback.message, state)
+
+
+@dp.callback_query(F.data == "confirm_keep_upload")
+async def cb_keep_upload(callback: types.CallbackQuery):
+    await callback.answer("Продолжайте загрузку")
+    await callback.message.delete()
+    await callback.message.answer(
+        "Хорошо, вы можете продолжить отправку фотографий.\n"
+        "Когда закончите, снова нажмите «✅ Завершить и отправить»."
     )
 
 
@@ -309,8 +409,8 @@ async def admin_all_orders(message: types.Message):
     text = "📋 **Текущие заказы на печать:**\n\n"
     for r in rows:
         text += (
-            f"📦 №`{r[0]}` | Статус: *{r[1]}* | "
-            f"Фото: {r[2]} шт.\n"
+            f"📦 №`{r}` | Статус: *{r}* | "
+            f"Фото: {r} шт.\n"
         )
     await message.answer(text, parse_mode="Markdown")
 
@@ -356,8 +456,8 @@ async def admin_change_status_get_id(
 @dp.callback_query(F.data.startswith("st_"))
 async def admin_confirm_status(callback: types.CallbackQuery):
     data = callback.data.split("_")
-    action = data[1]
-    order_id = data[2]
+    action = data
+    order_id = data
 
     new_status = "готовится" if action == "prep" else "готово"
 
@@ -379,10 +479,10 @@ async def admin_confirm_status(callback: types.CallbackQuery):
         parse_mode="Markdown",
     )
 
-    if action == "done" and user_row and user_row[0]:
+    if action == "done" and user_row and user_row:
         try:
             await bot.send_message(
-                chat_id=int(user_row[0]),
+                chat_id=int(user_row),
                 text=f"🎉 **Отличные новости!**\n"
                 f"Ваш заказ фотографий №`{order_id}` распечатан "
                 f"и готов к отправке через Wildberries!",
@@ -436,8 +536,8 @@ async def client_check_any_order(message: types.Message):
     if row:
         await message.answer(
             f"📦 **Статус заказа №{text}:**\n\n"
-            f"Состояние: *{row[0]}*\n"
-            f"Всего фотографий: {row[1]} шт.",
+            f"Состояние: *{row}*\n"
+            f"Всего фотографий: {row} шт.",
             parse_mode="Markdown",
         )
     else:
