@@ -209,8 +209,8 @@ async def client_support(message: types.Message):
     )
     await message.answer(
         "🆘 **Поддержка клиентов**\n\n"
-        "Отправьте номер вашего заказа WB, а затем загрузите фото "
-        "или просто пришлите ЛЮБУЮ ссылку на файлы/архив.",
+        "Если возникли вопросы или проблемы с отправкой фото или ссылки, возможно проблемы с заказом, "
+        "нажмите на кнопку ниже и напишите нам и мы решим вопрос.",
         reply_markup=builder.as_markup(),
         parse_mode="Markdown",
     )
@@ -220,7 +220,7 @@ async def client_support(message: types.Message):
 async def client_start_upload(message: types.Message, state: FSMContext):
     await state.set_state(ClientStates.waiting_for_wb_number)
     await message.answer(
-        "Введите номер вашего заказа WB:",
+        "Введите номер вашего заказа WB он в вашем личном кабинете:",
         reply_markup=types.ReplyKeyboardRemove(),
     )
 
@@ -277,8 +277,8 @@ async def client_handle_any_link(message: types.Message, state: FSMContext):
         f"📥 **НОВЫЙ ЗАКАЗ ПО ССЫЛКЕ!**\n\n"
         f"📦 **WB:** `{num}`\n"
         f"🌐 **Ссылка:** {link}\n"
-        f"📅 **Дата:** {now_str}\n"
-        f"👤 **Кто:** {user_info}\n"
+        f"📅 **Дата заказа:** {now_str}\n"
+        f"👤 **Клиент:** {user_info}\n"
     )
     
     target = get_target_chat()
