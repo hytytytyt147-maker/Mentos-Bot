@@ -257,7 +257,7 @@ async def client_finish_upload(
         )
     except Exception as e:
         await bot.send_message(
-            chat_id=ADMIN_ID, f"Ошибка отправки архива: {e}"
+            chat_id=ADMIN_ID, text=f"Ошибка отправки архива: {e}"
         )
 
     # Удаляем сам архив с сервера, так как он уже улетел в Telegram
