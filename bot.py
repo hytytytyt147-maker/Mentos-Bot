@@ -12,7 +12,7 @@ from aiogram.utils.keyboard import ReplyKeyboardBuilder
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 # Токен и ваш ID (как владельца магазина)
-TOKEN = "6847024615:AAHF9RX5n17QknZx3ky_4kRuHn5f83v4bIs"
+TOKEN = "8947024615:AAHf9RX5nl70knZ3aKy_4WRuhn5f83vHkIs"
 ADMIN_ID = 1924047464
 
 bot = Bot(token=TOKEN)
