@@ -337,6 +337,7 @@ def get_admin_kb():
     return builder.as_markup(resize_keyboard=True)
 
 
+# НОВОЕ: Инлайн-кнопка ОТМЕНЫ во всех шагах ввода для админа
 def get_admin_panel_inline():
     builder = InlineKeyboardBuilder()
     builder.add(types.InlineKeyboardButton(text="📁 Изменить чат архивов", callback_data="adm_setchat"))
@@ -346,12 +347,19 @@ def get_admin_panel_inline():
     return builder.as_markup()
 
 
+def get_cancel_inline():
+    builder = InlineKeyboardBuilder()
+    builder.add(types.InlineKeyboardButton(text="❌ Отмена", callback_data="adm_cancel_input"))
+    return builder.as_markup()
+
+
 def get_status_inline(order_id):
     builder = InlineKeyboardBuilder()
     builder.add(types.InlineKeyboardButton(text="⏳ Готовится", callback_data=f"st_prep_{order_id}"))
     builder.add(types.InlineKeyboardButton(text="✅ Готово", callback_data=f"st_done_{order_id}"))
     builder.add(types.InlineKeyboardButton(text="🗑️ Удалить заказ", callback_data=f"st_del_{order_id}"))
-    builder.adjust(2, 1)
+    builder.add(types.InlineKeyboardButton(text="⬅️ Назад к списку", callback_data="adm_back_to_list"))
+    builder.adjust(2, 1, 1)
     return builder.as_markup()
 
 
@@ -367,8 +375,8 @@ async def admin_all_orders(message: types.Message):
         await message.answer("📋 База заказов пуста.")
         return
     text = "📋 **Текущие заказы:**\n\n"
-    for order_number, status, photo_count in rows:
-        text += f"📦 №`{order_number}` | Статус: *{status}* | Информация: {photo_count}\n"
+    for num, status, count in rows:
+        text += f"📦 №`{num}` | Статус: *{status}* | Информация: {count}\n"
     await message.answer(text, parse_mode="Markdown")
 
 
@@ -384,11 +392,31 @@ async def admin_change_status_inline(message: types.Message):
         await message.answer("❌ Активных заказов нет.")
         return
     builder = InlineKeyboardBuilder()
-    for order_number, status in rows:
+    for num, status in rows:
         icon = "⏳" if status == "готовится" else "✅"
-        builder.add(types.InlineKeyboardButton(text=f"{icon} №{order_number}", callback_data=f"sel_ord_{order_number}"))
+        builder.add(types.InlineKeyboardButton(text=f"{icon} №{num}", callback_data=f"sel_ord_{num}"))
     builder.adjust(1)
     await message.answer("Выберите заказ для управления:", reply_markup=builder.as_markup())
+
+
+@dp.callback_query(F.data == "adm_back_to_list")
+async def cb_back_to_list(callback: types.CallbackQuery):
+    if not is_admin(callback.from_user.id): return
+    await callback.answer()
+    conn = sqlite3.connect("wb_shop.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT order_number, status FROM orders")
+    rows = cursor.fetchall()
+    conn.close()
+    if not rows:
+        await callback.message.edit_text("❌ Активных заказов нет.")
+        return
+    builder = InlineKeyboardBuilder()
+    for num, status in rows:
+        icon = "⏳" if status == "готовится" else "✅"
+        builder.add(types.InlineKeyboardButton(text=f"{icon} №{num}", callback_data=f"sel_ord_{num}"))
+    builder.adjust(1)
+    await callback.message.edit_text("Выберите заказ для управления:", reply_markup=builder.as_markup())
 
 
 @dp.callback_query(F.data.startswith("sel_ord_"))
@@ -398,12 +426,10 @@ async def admin_select_order_menu(callback: types.CallbackQuery):
     await callback.message.edit_text(f"Управление заказом №`{order_id}`:", reply_markup=get_status_inline(order_id), parse_mode="Markdown")
 
 
-# ПОЛНОСТЬЮ ИСПРАВЛЕНО: Индексы прописаны строго, InterfaceError больше не появится!
 @dp.callback_query(F.data.startswith("st_"))
 async def admin_confirm_status(callback: types.CallbackQuery):
     data = callback.data.split("_")
-    action = data[1]
-    order_id = data[2]
+    action, order_id = data[1], data[2]
     conn = sqlite3.connect("wb_shop.db")
     cursor = conn.cursor()
     if action == "del":
@@ -437,15 +463,21 @@ async def handle_admin_settings_callbacks(callback: types.CallbackQuery, state: 
     if not is_admin(callback.from_user.id): return
     action = callback.data.split("_")[1]
     await callback.answer()
+    
+    if action == "cancel_input":
+        await state.clear()
+        await callback.message.edit_text("❌ Ввод отменен. Возврат в админ-панель.", reply_markup=None)
+        return
+
     if action == "setchat":
         await state.set_state(AdminStates.waiting_for_chat_id)
-        await callback.message.answer("Введите новый числовой ID чата/группы для ZIP-архивов:")
+        await callback.message.edit_text("Введите новый числовой ID чата/группы для ZIP-архивов:", reply_markup=get_cancel_inline())
     elif action == "addnew":
         await state.set_state(AdminStates.waiting_for_new_admin)
-        await callback.message.answer("Введите Telegram ID пользователя, которого хотите назначить АДМИНИСТРАТОРОМ:")
+        await callback.message.edit_text("Введите Telegram ID пользователя, которого хотите назначить АДМИНИСТРАТОРОМ:", reply_markup=get_cancel_inline())
     elif action == "delold":
         await state.set_state(AdminStates.waiting_for_del_admin)
-        await callback.message.answer("Введите Telegram ID пользователя, которого хотите УДАЛИТЬ из админов:")
+        await callback.message.edit_text("Введите Telegram ID пользователя, которого хотите УДАЛИТЬ из админов:", reply_markup=get_cancel_inline())
 
 
 @dp.message(AdminStates.waiting_for_chat_id)
