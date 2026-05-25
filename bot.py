@@ -23,8 +23,6 @@ scheduler = AsyncIOScheduler()
 
 if not os.path.exists("temp_photos"):
     os.makedirs("temp_photos")
-
-
 def init_db():
     conn = sqlite3.connect("wb_shop.db")
     cursor = conn.cursor()
@@ -131,7 +129,9 @@ class AntiSpamMiddleware(BaseMiddleware):
         self.storage = {}
         super().__init__()
     async def __call__(self, handler, event: types.Message, data: dict):
-        if not event.from_user or event.photo:
+        if not event.from_user:
+            return await handler(event, data)
+        if event.photo:
             return await handler(event, data)
         user_id = event.from_user.id
         now = time.time()
@@ -228,8 +228,6 @@ async def client_handle_photo(message: types.Message, state: FSMContext):
     await bot.download_file(file_info.file_path, local_path)
     paths.append(local_path)
     await state.update_data(photo_paths=paths)
-
-
 @dp.message(ClientStates.sending_photos, F.text.startswith("http"))
 async def client_handle_any_link(message: types.Message, state: FSMContext):
     data = await state.get_data()
@@ -395,15 +393,17 @@ async def admin_change_status_inline(message: types.Message):
 
 @dp.callback_query(F.data.startswith("sel_ord_"))
 async def admin_select_order_menu(callback: types.CallbackQuery):
-    order_id = callback.data.split("_")
+    order_id = callback.data.split("_")[2]
     await callback.answer()
     await callback.message.edit_text(f"Управление заказом №`{order_id}`:", reply_markup=get_status_inline(order_id), parse_mode="Markdown")
 
 
+# ПОЛНОСТЬЮ ИСПРАВЛЕНО: Индексы прописаны строго, InterfaceError больше не появится!
 @dp.callback_query(F.data.startswith("st_"))
 async def admin_confirm_status(callback: types.CallbackQuery):
     data = callback.data.split("_")
-    action, order_id = data, data
+    action = data[1]
+    order_id = data[2]
     conn = sqlite3.connect("wb_shop.db")
     cursor = conn.cursor()
     if action == "del":
@@ -421,8 +421,8 @@ async def admin_confirm_status(callback: types.CallbackQuery):
     conn.close()
     await callback.answer("Статус обновлен")
     await callback.message.edit_text(f"✅ Статус заказа №`{order_id}` изменен на *{new_status}*.", parse_mode="Markdown")
-    if action == "done" and user_row:
-        try: await bot.send_message(chat_id=int(user_row), text=f"🎉 **Отличные новости!**\nВаш заказ фотографий №`{order_id}` полностью распечатан и готов к отправке!", parse_mode="Markdown")
+    if action == "done" and user_row and user_row[0]:
+        try: await bot.send_message(chat_id=int(user_row[0]), text=f"🎉 **Отличные новости!**\nВаш заказ фотографий №`{order_id}` полностью распечатан и готов к отправке!", parse_mode="Markdown")
         except Exception: pass
 
 
@@ -435,7 +435,7 @@ async def open_admin_panel(message: types.Message):
 @dp.callback_query(F.data.startswith("adm_"))
 async def handle_admin_settings_callbacks(callback: types.CallbackQuery, state: FSMContext):
     if not is_admin(callback.from_user.id): return
-    action = callback.data.split("_")
+    action = callback.data.split("_")[1]
     await callback.answer()
     if action == "setchat":
         await state.set_state(AdminStates.waiting_for_chat_id)
@@ -493,7 +493,7 @@ async def client_check_any_order(message: types.Message):
     cursor.execute("SELECT status, photo_count FROM orders WHERE order_number=?", (text,))
     row = cursor.fetchone()
     conn.close()
-    if row: await message.answer(f"📦 **Статус №{text}:**\n\nСостояние: *{row}*\nИнформация: {row}", parse_mode="Markdown")
+    if row: await message.answer(f"📦 **Статус №{text}:**\n\nСостояние: *{row[0]}*\nИнформация: {row[1]}", parse_mode="Markdown")
     else: await message.answer("❌ Заказ пока не найден.")
 
 
