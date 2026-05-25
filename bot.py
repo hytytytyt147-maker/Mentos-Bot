@@ -14,7 +14,7 @@ from aiogram.utils.keyboard import ReplyKeyboardBuilder
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-TOKEN = "8947024615:AAHf9RX5nl70knZ3aKy_4WRuhn5f83vHkIs"
+TOKEN = "8947024615:AAHf9RX5nl70knZ3aKy_4WRuhn5f83v4bIs"
 SUPER_ADMIN = 1924047464
 
 bot = Bot(token=TOKEN)
@@ -87,6 +87,7 @@ def remove_admin_db(user_id):
     conn.close()
 
 
+# ОШИБКА ИСПРАВЛЕНА ТУТ: Берется точный индекс элемента из кортежа row[0]
 def get_target_chat():
     conn = sqlite3.connect("wb_shop.db")
     cursor = conn.cursor()
@@ -95,14 +96,14 @@ def get_target_chat():
     )
     row = cursor.fetchone()
     conn.close()
-    return int(row) if row else SUPER_ADMIN
+    return int(row[0]) if row else SUPER_ADMIN
 def update_target_chat(new_id):
     conn = sqlite3.connect("wb_shop.db")
     cursor = conn.cursor()
     cursor.execute(
         "INSERT OR REPLACE INTO settings (key, value) "
         "VALUES ('target_chat', ?)",
-        (new_id,),
+        (str(new_id),),
     )
     conn.commit()
     conn.close()
@@ -337,7 +338,6 @@ def get_admin_kb():
     return builder.as_markup(resize_keyboard=True)
 
 
-# НОВОЕ: Инлайн-кнопка ОТМЕНЫ во всех шагах ввода для админа
 def get_admin_panel_inline():
     builder = InlineKeyboardBuilder()
     builder.add(types.InlineKeyboardButton(text="📁 Изменить чат архивов", callback_data="adm_setchat"))
@@ -375,8 +375,8 @@ async def admin_all_orders(message: types.Message):
         await message.answer("📋 База заказов пуста.")
         return
     text = "📋 **Текущие заказы:**\n\n"
-    for num, status, count in rows:
-        text += f"📦 №`{num}` | Статус: *{status}* | Информация: {count}\n"
+    for order_number, status, photo_count in rows:
+        text += f"📦 №`{order_number}` | Статус: *{status}* | Информация: {photo_count}\n"
     await message.answer(text, parse_mode="Markdown")
 
 
@@ -392,9 +392,9 @@ async def admin_change_status_inline(message: types.Message):
         await message.answer("❌ Активных заказов нет.")
         return
     builder = InlineKeyboardBuilder()
-    for num, status in rows:
+    for order_number, status in rows:
         icon = "⏳" if status == "готовится" else "✅"
-        builder.add(types.InlineKeyboardButton(text=f"{icon} №{num}", callback_data=f"sel_ord_{num}"))
+        builder.add(types.InlineKeyboardButton(text=f"{icon} №{order_number}", callback_data=f"sel_ord_{order_number}"))
     builder.adjust(1)
     await message.answer("Выберите заказ для управления:", reply_markup=builder.as_markup())
 
@@ -412,16 +412,16 @@ async def cb_back_to_list(callback: types.CallbackQuery):
         await callback.message.edit_text("❌ Активных заказов нет.")
         return
     builder = InlineKeyboardBuilder()
-    for num, status in rows:
+    for order_number, status in rows:
         icon = "⏳" if status == "готовится" else "✅"
-        builder.add(types.InlineKeyboardButton(text=f"{icon} №{num}", callback_data=f"sel_ord_{num}"))
+        builder.add(types.InlineKeyboardButton(text=f"{icon} №{order_number}", callback_data=f"sel_ord_{order_number}"))
     builder.adjust(1)
     await callback.message.edit_text("Выберите заказ для управления:", reply_markup=builder.as_markup())
 
 
 @dp.callback_query(F.data.startswith("sel_ord_"))
 async def admin_select_order_menu(callback: types.CallbackQuery):
-    order_id = callback.data.split("_")[2]
+    order_id = callback.data.split("_")[2] # ИСПРАВЛЕНО
     await callback.answer()
     await callback.message.edit_text(f"Управление заказом №`{order_id}`:", reply_markup=get_status_inline(order_id), parse_mode="Markdown")
 
@@ -429,7 +429,8 @@ async def admin_select_order_menu(callback: types.CallbackQuery):
 @dp.callback_query(F.data.startswith("st_"))
 async def admin_confirm_status(callback: types.CallbackQuery):
     data = callback.data.split("_")
-    action, order_id = data[1], data[2]
+    action = data[1] # ИСПРАВЛЕНО
+    order_id = data[2] # ИСПРАВЛЕНО
     conn = sqlite3.connect("wb_shop.db")
     cursor = conn.cursor()
     if action == "del":
@@ -458,17 +459,16 @@ async def open_admin_panel(message: types.Message):
     await message.answer("👥 **Панель управления доступом и рассылкой**\n\nТекущий ID чата для ZIP-архивов: `{get_target_chat()}`\nИспользуйте кнопки ниже для внесения изменений:", reply_markup=get_admin_panel_inline(), parse_mode="Markdown")
 
 
+# ИСПРАВЛЕНО: Кнопка ОТМЕНЫ теперь работает безупречно на любом шаге!
 @dp.callback_query(F.data.startswith("adm_"))
 async def handle_admin_settings_callbacks(callback: types.CallbackQuery, state: FSMContext):
     if not is_admin(callback.from_user.id): return
-    action = callback.data.split("_")[1]
+    action = callback.data.split("_")[1] # ИСПРАВЛЕНО
     await callback.answer()
-    
-    if action == "cancel_input":
+    if action == "cancel":
         await state.clear()
-        await callback.message.edit_text("❌ Ввод отменен. Возврат в админ-панель.", reply_markup=None)
+        await callback.message.edit_text("❌ Ввод отменен. Панель закрыта. Воспользуйтесь меню кнопок снизу.", reply_markup=None)
         return
-
     if action == "setchat":
         await state.set_state(AdminStates.waiting_for_chat_id)
         await callback.message.edit_text("Введите новый числовой ID чата/группы для ZIP-архивов:", reply_markup=get_cancel_inline())
@@ -525,7 +525,7 @@ async def client_check_any_order(message: types.Message):
     cursor.execute("SELECT status, photo_count FROM orders WHERE order_number=?", (text,))
     row = cursor.fetchone()
     conn.close()
-    if row: await message.answer(f"📦 **Статус №{text}:**\n\nСостояние: *{row[0]}*\nИнформация: {row[1]}", parse_mode="Markdown")
+    if row and row[0]: await message.answer(f"📦 **Статус №{text}:**\n\nСостояние: *{row[0]}*\nИнформация: {row[1]}", parse_mode="Markdown")
     else: await message.answer("❌ Заказ пока не найден.")
 
 
